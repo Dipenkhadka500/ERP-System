@@ -1,0 +1,1032 @@
+# MASTER DEVELOPMENT PROMPT
+## DIPEN SYSTEM – Complete ERP Migration from Google Apps Script to Java Spring Boot + MySQL
+
+**Organization:** Birat Healthcare Industries Pvt. Ltd.  
+**Existing Application:** Operations & Inventory ERP  
+**Target Database:** `DIPEN_ERP`  
+**Target Backend:** Java 21 + Spring Boot  
+**Target Frontend:** HTML5 + CSS3 + Vanilla JavaScript  
+**Database Engine:** MySQL Community Server 8.4 LTS  
+**Spreadsheet Integration:** Google Sheets API  
+**Deployment Environment:** Windows 11 Office Server  
+**Target Monthly Software and Hosting Cost:** NPR 0, subject to existing hardware, internet and service limitations.
+
+---
+
+# 1. YOUR ROLE
+
+Act as a senior ERP software architect, Java Spring Boot developer, MySQL database architect, frontend developer, ERP migration specialist and quality assurance engineer.
+
+Your assignment is to migrate and upgrade the existing Birat Healthcare Industries Pvt. Ltd. Operations & Inventory ERP into a standalone, professional, production-ready ERP system called:
+
+**DIPEN SYSTEM – MANUFACTURING ERP**
+
+This is an existing ERP migration project, NOT a new ERP development project.
+
+Your first responsibility is to understand the existing application completely. Your second responsibility is to reproduce its existing functionality and data in the new architecture. Your third responsibility is to implement the new technical infrastructure.
+
+# 2. EXISTING ERP APPLICATION
+
+Existing deployed application:
+
+https://script.google.com/macros/s/AKfycbz9qBbo6ACaUMrvvY1ohTyPogZLklAshMDRLptsekq5beG7wt2NesUFC26F28sc0K-7Jg/exec
+
+The existing application is developed using Google Apps Script, HTML, CSS, JavaScript and Google Sheets.
+
+Treat this application as the ORIGINAL SOURCE OF TRUTH for existing business functionality.
+
+Before development, inspect and obtain:
+
+1. Complete existing Code.js / Code.gs backend.
+2. Complete existing Index.html frontend.
+3. All additional HTML, CSS and JavaScript files.
+4. Connected Google Spreadsheet and all its worksheets.
+5. Existing sheet headers and column structures.
+6. Existing records and master data.
+7. Existing user accounts and roles.
+8. Existing business rules and calculations.
+9. Existing reports, dashboards and charts.
+10. Existing navigation, forms, buttons and workflows.
+
+Do not assume that the deployed URL provides access to the underlying source code.
+
+If source files, spreadsheet permissions or database information are unavailable, request the missing materials before making changes.
+
+Do not invent missing functionality or data.
+
+# 3. NON-NEGOTIABLE MIGRATION RULES
+
+These requirements override all other development preferences.
+
+## Rule 1: Preserve existing functionality
+
+Do not remove, simplify, replace or redesign any existing business functionality without explicit authorization.
+
+Preserve:
+
+- All existing modules.
+- All existing submodules.
+- All existing forms.
+- All existing input fields.
+- All existing table columns.
+- All existing dropdown options.
+- All existing buttons and actions.
+- All existing filters and search functions.
+- All existing calculations.
+- All existing validations.
+- All existing reports.
+- All existing dashboard KPIs.
+- All existing user permissions.
+- All existing workflows.
+- All existing business rules.
+
+## Rule 2: Preserve existing data
+
+Every existing business record must be migrated accurately.
+
+Preserve:
+
+- Record IDs.
+- Item codes.
+- Supplier IDs.
+- Purchase order numbers.
+- Indent numbers.
+- Tender numbers.
+- Shipment references.
+- Transaction dates.
+- Quantities.
+- Units of measurement.
+- Currency values.
+- Exchange rates.
+- Tax calculations.
+- Stock balances.
+- Opening balances.
+- Production records.
+- BOM records.
+- Dispatch records.
+- User-role relationships.
+- Historical transactions.
+- Created and updated timestamps.
+
+Do not reset existing records or generate new identifiers for existing records unless a documented mapping preserves their original references.
+
+## Rule 3: Preserve calculations
+
+All existing calculation formulas must be inspected and reproduced.
+
+Examples include:
+
+- Purchase order totals.
+- VAT calculations.
+- Exchange rate conversions.
+- Import landed costs.
+- Freight allocation.
+- Stock balances.
+- Average purchase costs.
+- Material consumption.
+- BOM material costs.
+- Production output.
+- Dispatch quantities.
+- Tender financial calculations.
+- Dashboard summaries.
+
+Use decimal-safe financial calculations in Java and MySQL. Do not use floating-point arithmetic for monetary values.
+
+## Rule 4: Preserve the existing design
+
+Keep the existing visual appearance, navigation structure, branding and user experience as closely as possible.
+
+Do not unnecessarily change:
+
+- Sidebar.
+- Navigation.
+- Header.
+- Dashboard.
+- Colors.
+- Typography.
+- Table design.
+- Modal design.
+- Forms.
+- Responsive layouts.
+
+Only make technical changes necessary to connect the frontend to the Java backend.
+
+## Rule 5: No destructive migration
+
+Never delete or overwrite the original Google Sheets database.
+
+The existing ERP must remain available until the new ERP passes migration testing and receives approval for production use.
+
+---
+
+# 4. TARGET TECHNOLOGY ARCHITECTURE
+
+Use the following technology stack exclusively unless a specific technical limitation requires approval.
+
+| Layer | Technology |
+|---|---|
+| Frontend | HTML5 |
+| Styling | CSS3 |
+| Frontend programming | Vanilla JavaScript |
+| Backend | Java 21 |
+| Framework | Spring Boot |
+| API | REST API |
+| Communication | JSON |
+| Database | MySQL 8.4 Community |
+| ORM | Spring Data JPA |
+| Database queries | JDBC where appropriate |
+| Build tool | Maven |
+| Authentication | Spring Security |
+| Password security | BCrypt |
+| Database migration | Flyway |
+| Charts | Chart.js |
+| Icons | Font Awesome Free |
+| Spreadsheet integration | Google Sheets API |
+| Version control | Git |
+
+Do not introduce React, Angular, Vue, Node.js, PHP, Python, Firebase or other unnecessary frameworks.
+
+The frontend must remain standard HTML, CSS and JavaScript.
+
+## Architecture
+
+Implement the following structure:
+
+Frontend → REST API → Java Spring Boot → MySQL.
+
+Google Sheets must connect through the Java backend.
+
+MySQL must become the primary and authoritative database.
+
+Google Sheets must act as an optional interface for bulk import, export, reporting and data migration.
+
+Do not allow independent spreadsheet modifications to silently overwrite official ERP transactions.
+
+---
+
+# 5. PROJECT DIRECTORY STRUCTURE
+
+Create a clean and maintainable project:
+
+DIPEN-SYSTEM/
+
+├── backend/
+│   ├── src/main/java/com/birathealthcare/dipen/
+│   │   ├── config/
+│   │   ├── security/
+│   │   ├── controller/
+│   │   ├── service/
+│   │   ├── repository/
+│   │   ├── entity/
+│   │   ├── dto/
+│   │   ├── mapper/
+│   │   ├── validation/
+│   │   ├── exception/
+│   │   ├── integration/
+│   │   └── DipenApplication.java
+│   │
+│   ├── src/main/resources/
+│   │   ├── application.properties
+│   │   ├── db/migration/
+│   │   └── static/
+│   │
+│   └── pom.xml
+│
+├── database/
+│   ├── schema/
+│   ├── migration/
+│   └── backup/
+│
+├── frontend/
+│   ├── index.html
+│   ├── css/
+│   ├── js/
+│   ├── assets/
+│   └── modules/
+│
+├── spreadsheet-integration/
+│   ├── import/
+│   ├── export/
+│   └── templates/
+│
+├── deployment/
+│   ├── windows/
+│   ├── backup/
+│   └── configuration/
+│
+├── documentation/
+│
+└── README.md
+
+The production frontend should be served directly by Spring Boot from its static resources directory to minimize hosting complexity.
+
+---
+
+# 6. COMPLETE EXISTING MODULE MIGRATION
+
+Inspect the original application and create an exact module inventory.
+
+The following modules are expected to be preserved wherever they exist in the original system.
+
+### A. Dashboard
+
+Preserve existing:
+
+- KPI cards.
+- Stock summaries.
+- Purchase summaries.
+- Production summaries.
+- Dispatch summaries.
+- Financial summaries.
+- Charts.
+- Date filters.
+- Dashboard calculations.
+- Quick actions.
+
+All dashboard information must be retrieved from MySQL through Java APIs.
+
+### B. User Management
+
+Preserve:
+
+- Existing users.
+- User IDs.
+- Roles.
+- Permissions.
+- Account statuses.
+- User-specific access.
+- Login functionality.
+
+Implement secure authentication and authorization.
+
+### C. Item Master
+
+Preserve all existing item master fields.
+
+Support the existing categories, including:
+
+- Raw Materials.
+- Packing Materials.
+- Finished Goods.
+- Work in Progress.
+- Consumables.
+- Other existing categories.
+
+Preserve item codes, item names, brands, descriptions, units, categories, conversion factors and reorder levels.
+
+### D. Supplier Management
+
+Preserve supplier information, contact details, addresses, supplier categories, payment terms and historical relationships.
+
+### E. Purchase Management
+
+Preserve all existing procurement functionality, including:
+
+- Purchase Indents.
+- Supplier Quotations.
+- Purchase Orders.
+- Purchase Order Items.
+- Approvals.
+- Purchase Tracking.
+- Purchase History.
+
+Preserve document numbering and status workflows.
+
+### F. Import Management
+
+Preserve:
+
+- Import purchase records.
+- LC/TT payment records.
+- Foreign supplier details.
+- Shipment records.
+- Freight forwarders.
+- Freight quotations.
+- ETD and ETA.
+- Customs records.
+- Clearance expenses.
+- Exchange rates.
+- Import document tracking.
+
+Preserve all existing landed-cost calculations.
+
+### G. Inventory Management
+
+Preserve:
+
+- Warehouse management.
+- Opening stock.
+- Goods receipts.
+- GRN records.
+- Stock transfers.
+- Stock adjustments.
+- Stock issues.
+- Stock balances.
+- Inventory reports.
+- Reorder alerts.
+- Historical stock movements.
+
+Implement a proper stock ledger.
+
+Every stock transaction must be recorded as an auditable transaction.
+
+Never modify historical transactions silently.
+
+### H. Bill of Materials (BOM)
+
+Preserve all existing BOM data and functionality.
+
+Support:
+
+- BOM creation.
+- BOM editing.
+- BOM deletion with appropriate transaction safeguards.
+- Production routines.
+- Batch BOMs.
+- WIP processes.
+- Finished Goods processes.
+- Material quantities.
+- Units of measurement.
+- Material costs.
+- Expected material costs.
+- BOM version history.
+
+Do not lose any existing BOM-to-item relationships.
+
+### I. Production
+
+Preserve:
+
+- Production planning.
+- Production orders.
+- BOM selection.
+- Batch production.
+- Material requirements.
+- Material consumption.
+- Actual production output.
+- Wastage.
+- Production costs.
+- Production history.
+- Stock integration.
+
+Production transactions must update inventory consistently and atomically.
+
+### J. Dispatch
+
+Preserve:
+
+- Dispatch orders.
+- Dispatch entries.
+- Item quantities.
+- Warehouse selection.
+- Customer information.
+- Dispatch dates.
+- Dispatch documents.
+- Stock deductions.
+- Dispatch history.
+
+### K. Tender Management
+
+Preserve all existing tender functionality, including:
+
+- Tender information.
+- Tender numbers.
+- Submission dates.
+- Bid bonds.
+- Bank guarantees.
+- LOI.
+- LOA.
+- Performance guarantees.
+- Samples.
+- Tender status.
+- Financial details.
+- Follow-up dates.
+- Historical tracking.
+
+### L. Other Existing Modules
+
+Any additional module discovered during source-code inspection must also be included in the migration.
+
+Do not restrict the project to the modules listed above.
+
+---
+
+# 7. MYSQL DATABASE DESIGN
+
+Create the database:
+
+DIPEN_ERP
+
+Use:
+
+- InnoDB storage engine.
+- UTF-8 MB4 character encoding.
+- Proper primary keys.
+- Foreign keys.
+- Appropriate indexes.
+- Unique constraints.
+- Decimal columns for monetary values.
+- Transaction-safe database operations.
+- Created and updated timestamps.
+
+Design relational tables based on the actual existing Google Sheets structures.
+
+Potential table groups:
+
+1. users
+2. roles
+3. permissions
+4. user_roles
+5. items
+6. item_categories
+7. units
+8. warehouses
+9. suppliers
+10. customers
+11. indents
+12. indent_items
+13. quotations
+14. quotation_items
+15. purchase_orders
+16. purchase_order_items
+17. lc_tt_payments
+18. shipments
+19. freight_forwarders
+20. freight_expenses
+21. goods_receipts
+22. goods_receipt_items
+23. stock_ledger
+24. stock_balances
+25. stock_transfers
+26. bom_routines
+27. bom_versions
+28. bom_batches
+29. bom_materials
+30. production_orders
+31. material_consumption
+32. production_outputs
+33. dispatch_orders
+34. dispatch_items
+35. tenders
+36. tender_tracking
+37. audit_logs
+38. settings
+39. import_logs
+40. export_logs
+
+These are proposed table groups, not permission to discard or rename existing data structures without mapping them.
+
+Create additional tables when the original system requires them.
+
+Use Flyway version-controlled database migrations.
+
+Do not use automatic Hibernate schema creation or update in production.
+
+---
+
+# 8. LOGIN AND ROLE-BASED ACCESS
+
+Preserve existing role assignments and access restrictions.
+
+Implement:
+
+- Secure login.
+- Password hashing using BCrypt.
+- Session management.
+- Logout.
+- Session expiration.
+- Role-based authorization.
+- Module-level permissions.
+- Action-level permissions.
+- Password reset process.
+- Audit logging.
+
+Possible roles include:
+
+- Super Admin.
+- Procurement Officer.
+- Store Officer.
+- Production Officer.
+- Dispatch Officer.
+
+However, use the actual existing roles and permissions as the migration source.
+
+Do not automatically grant all permissions to every user.
+
+Never migrate plaintext passwords.
+
+If the existing password system cannot be migrated securely, create a controlled password-reset procedure.
+
+---
+
+# 9. GOOGLE SHEETS INTEGRATION
+
+Google Sheets must remain available as an additional data-entry and reporting facility.
+
+Implement two-way integration.
+
+### Import
+
+Users should be able to:
+
+- Download standard ERP spreadsheet templates.
+- Enter bulk records in Google Sheets or Excel-compatible spreadsheets.
+- Import validated records into MySQL.
+- Preview records before import.
+- Identify invalid rows.
+- Detect duplicate records.
+- Review error messages.
+- Confirm the import.
+- View import history.
+
+Support appropriate imports for:
+
+- Item Master.
+- Supplier Master.
+- Opening Stock.
+- Purchase Orders.
+- GRN.
+- BOM.
+- Production.
+- Dispatch.
+- Other applicable existing modules.
+
+### Export
+
+Allow authorized users to:
+
+- Export selected records.
+- Export filtered records.
+- Export stock balances.
+- Export purchase reports.
+- Export production reports.
+- Export dispatch reports.
+- Export tender reports.
+- Export historical transactions.
+
+### Integration rules
+
+1. MySQL is the official database.
+2. Google Sheets must never silently overwrite existing records.
+3. Every import must be validated.
+4. Imports must support rollback if a transaction fails.
+5. Use stable record IDs and unique document references.
+6. Maintain import and export logs.
+7. Respect the current user's permissions.
+8. Protect Google API credentials.
+9. Do not expose service-account credentials in frontend JavaScript.
+10. Handle Google API quotas and connection errors.
+
+---
+
+# 10. AUTOMATIC DATABASE BACKUP
+
+Implement automated backup functionality.
+
+Requirements:
+
+- Daily scheduled database backups.
+- Manual backup option for authorized administrators.
+- Backup date and timestamp.
+- Backup history.
+- Backup status.
+- Error logging.
+- Backup retention policy.
+- Restore procedure.
+- Backup integrity verification.
+
+Use MySQL-supported backup utilities such as mysqldump.
+
+Store backups separately from the primary database files.
+
+Maintain at least one separate encrypted backup copy outside the office computer.
+
+Do not claim that a backup is successful until the output file has been verified.
+
+Test restoration before production migration.
+
+---
+
+# 11. FRONTEND CONNECTION
+
+Preserve the existing frontend as closely as possible.
+
+Replace Google Apps Script calls with Java REST API calls.
+
+For example:
+
+Existing:
+
+google.script.run.getInventory();
+
+New:
+
+fetch('/api/inventory');
+
+Create centralized JavaScript API functions.
+
+Handle:
+
+- Loading indicators.
+- API errors.
+- Authentication errors.
+- Session expiration.
+- Form validation.
+- Duplicate submissions.
+- Pagination.
+- Search.
+- Filtering.
+- Sorting.
+- Success notifications.
+- Error notifications.
+
+Do not make unnecessary frontend redesigns.
+
+Do not replace functional existing screens with generic placeholders.
+
+Every existing working button must have an equivalent working action after migration.
+
+---
+
+# 12. PERFORMANCE REQUIREMENTS
+
+The deployment computer has:
+
+- Windows 11.
+- 8 GB RAM.
+- Static public IP.
+- Office network access.
+- Approximately 2–5 concurrent users.
+- Approximately 1,000 initial records.
+
+Optimize the application for this environment.
+
+Requirements:
+
+1. Use a single Spring Boot application.
+2. Use a single MySQL database.
+3. Serve frontend files directly through Spring Boot.
+4. Use database indexes.
+5. Use pagination for large tables.
+6. Avoid unnecessary API calls.
+7. Avoid repeatedly loading entire tables.
+8. Use efficient SQL queries.
+9. Use connection pooling.
+10. Use proper caching for suitable master data.
+11. Avoid unnecessary frameworks.
+12. Avoid Docker initially.
+13. Optimize dashboard queries.
+14. Avoid blocking operations on the frontend.
+
+The system should remain responsive with 2–5 concurrent users.
+
+Do not promise zero latency. Measure actual performance and optimize identified bottlenecks.
+
+---
+
+# 13. SECURITY AND NETWORK DEPLOYMENT
+
+Target environment: Existing Windows 11 office computer.
+
+Configure:
+
+- Local office network access.
+- Static private IP or DHCP reservation.
+- Windows Firewall.
+- Secure database credentials.
+- HTTPS for remote connections.
+- VPN-based remote access.
+- Individual user accounts.
+- Audit logging.
+- Scheduled backups.
+
+Never expose MySQL port 3306 directly to the public internet.
+
+Do not expose the ERP application publicly without an appropriate secure access design.
+
+The remote-access solution must be compatible with the existing office router and ISP.
+
+Do not assume that a static public IP automatically provides port forwarding.
+
+Test network connectivity before implementing remote access.
+
+---
+
+# 14. DATA MIGRATION STRATEGY
+
+This is the most critical part of the project.
+
+Perform migration in the following order.
+
+### Phase 1: Existing System Audit
+
+Inspect all original source files and spreadsheet worksheets.
+
+Produce:
+
+- Existing module inventory.
+- Existing feature inventory.
+- Existing database structure.
+- Existing column mapping.
+- Existing user-role mapping.
+- Existing workflow documentation.
+- Existing calculation documentation.
+
+### Phase 2: Data Backup
+
+Create a complete backup of the original Google Sheets database.
+
+Preserve all worksheets and original records.
+
+Do not modify the original source.
+
+### Phase 3: Data Mapping
+
+Map every original spreadsheet column to its corresponding MySQL table and column.
+
+Create a migration mapping document.
+
+No source column should be silently ignored.
+
+### Phase 4: Database Creation
+
+Create the DIPEN_ERP database.
+
+Implement all required tables and relationships.
+
+### Phase 5: Test Migration
+
+Import a copy of the original data.
+
+Validate:
+
+- Record counts.
+- Unique IDs.
+- Document numbers.
+- Foreign key relationships.
+- Opening stock.
+- Closing stock.
+- Purchase totals.
+- BOM calculations.
+- Production quantities.
+- Dispatch quantities.
+- Tender records.
+
+### Phase 6: Functional Parity Testing
+
+Compare the original ERP and new ERP using identical test cases.
+
+Every important existing workflow must produce equivalent results.
+
+### Phase 7: User Acceptance Testing
+
+Allow authorized users to test the new ERP.
+
+Record all errors and missing features.
+
+Do not declare the migration complete until the identified critical issues are resolved.
+
+### Phase 8: Production Cutover
+
+Only after formal approval:
+
+1. Create a final backup.
+2. Temporarily stop new entries in the original ERP.
+3. Migrate the latest records and transactions.
+4. Validate record counts and balances.
+5. Activate the new Java ERP.
+6. Keep the old ERP available in read-only mode.
+7. Monitor the new system.
+
+### Phase 9: Rollback Plan
+
+If a serious problem occurs:
+
+- Stop new transactions in the new ERP.
+- Preserve its transaction logs.
+- Restore the last verified backup if required.
+- Re-enable the original ERP.
+- Reconcile transactions made after migration.
+- Investigate and correct the issue.
+
+Never delete the original application or original spreadsheet as part of deployment.
+
+---
+
+# 15. FUNCTIONAL PARITY TESTING
+
+Create a migration testing checklist.
+
+For every existing module, test:
+
+- View records.
+- Add records.
+- Edit records.
+- Delete records where authorized.
+- Search.
+- Filter.
+- Sort.
+- Pagination.
+- Validation.
+- Calculations.
+- Reports.
+- Export.
+- Permissions.
+- Error handling.
+
+For inventory, test stock movement calculations.
+
+For procurement, test purchase totals and document relationships.
+
+For BOM, test material requirements and cost calculations.
+
+For production, test material consumption and finished goods output.
+
+For dispatch, test stock deduction.
+
+For tender, test document tracking and financial calculations.
+
+All results must be compared with the original ERP.
+
+---
+
+# 16. DEVELOPMENT DELIVERABLES
+
+Deliver the following complete implementation:
+
+1. Complete Java Spring Boot backend source.
+2. Complete HTML frontend.
+3. Complete CSS files.
+4. Complete JavaScript files.
+5. Maven pom.xml.
+6. MySQL database schema.
+7. Flyway database migrations.
+8. Database connection configuration.
+9. Authentication and authorization implementation.
+10. Google Sheets API integration.
+11. Data migration utilities.
+12. Backup and restore utilities.
+13. Windows deployment scripts.
+14. Initial database setup instructions.
+15. Administrator guide.
+16. User guide.
+17. Testing documentation.
+18. Migration mapping document.
+19. Rollback instructions.
+20. Production deployment guide.
+
+Provide complete source code, not incomplete snippets.
+
+Do not use placeholders for essential business functionality.
+
+Do not claim that a feature is implemented unless its code and working behavior have been verified.
+
+---
+
+# 17. REQUIRED DEVELOPMENT WORKFLOW
+
+Follow this order strictly.
+
+**Stage A – Audit**
+
+Inspect the existing source code and spreadsheet.
+
+Do not begin rewriting until the audit is complete.
+
+**Stage B – Migration Documentation**
+
+Prepare the module inventory, feature inventory, database mapping and workflow documentation.
+
+**Stage C – Database Foundation**
+
+Build the MySQL database and migration framework.
+
+**Stage D – Backend Foundation**
+
+Build Spring Boot, authentication, authorization and REST APIs.
+
+**Stage E – Frontend Migration**
+
+Connect the existing frontend to the Java APIs while preserving its appearance and functionality.
+
+**Stage F – Google Sheets Integration**
+
+Implement import, export and migration facilities.
+
+**Stage G – Backup and Deployment**
+
+Implement automatic backup and Windows 11 deployment.
+
+**Stage H – Verification**
+
+Perform data comparison, functional testing, security testing and user acceptance testing.
+
+**Stage I – Production Release**
+
+Release only after the migration passes acceptance criteria.
+
+---
+
+# 18. STRICT ACCEPTANCE CRITERIA
+
+The new ERP will only be considered successfully migrated when:
+
+1. All existing modules are accounted for.
+2. All existing functional requirements are preserved.
+3. All original records are migrated or explicitly reconciled.
+4. All important document IDs remain traceable.
+5. All financial calculations match.
+6. All stock balances reconcile.
+7. All BOM and production relationships are preserved.
+8. All user-role permissions are maintained.
+9. All major existing workflows operate successfully.
+10. Google Sheets import/export works.
+11. Automatic backups work.
+12. Backup restoration has been tested.
+13. Office LAN access works.
+14. Authorized remote access works.
+15. No critical migration defects remain.
+16. The original ERP remains available until approval.
+
+Prepare a migration reconciliation report showing:
+
+| Module | Original Records | Migrated Records | Difference | Status |
+|---|---:|---:|---:|---|
+| Item Master | Actual count | Actual count | Actual difference | Verified/Pending |
+| Suppliers | Actual count | Actual count | Actual difference | Verified/Pending |
+| Purchase | Actual count | Actual count | Actual difference | Verified/Pending |
+| Inventory | Actual count | Actual count | Actual difference | Verified/Pending |
+| BOM | Actual count | Actual count | Actual difference | Verified/Pending |
+| Production | Actual count | Actual count | Actual difference | Verified/Pending |
+| Dispatch | Actual count | Actual count | Actual difference | Verified/Pending |
+| Tender | Actual count | Actual count | Actual difference | Verified/Pending |
+
+Never fabricate reconciliation results.
+
+---
+
+# 19. FINAL INSTRUCTIONS
+
+This project is an upgrade of an existing operational ERP, not an opportunity to create a different business system.
+
+Preserve the existing business logic, database records, workflows and user experience.
+
+Make the architecture more maintainable, secure and reliable without changing how employees perform their existing work.
+
+Use Java Spring Boot and MySQL as the new permanent backend and database.
+
+Keep HTML, CSS and Vanilla JavaScript as the frontend.
+
+Maintain Google Sheets integration for bulk data entry, migration and reporting.
+
+Optimize for the existing Windows 11 computer with 8 GB RAM and 2–5 concurrent users.
+
+Minimize additional monthly expenses. Use free and open-source software wherever appropriate.
+
+**MOST IMPORTANT: DO NOT REPLACE THE EXISTING SYSTEM UNTIL THE NEW SYSTEM HAS PASSED DATA RECONCILIATION, FUNCTIONAL PARITY TESTING, BACKUP RESTORATION TESTING AND USER ACCEPTANCE TESTING.**
+
+Begin by requesting and auditing the existing source files and connected Google Sheets database. Produce the complete system audit and migration blueprint before modifying any production data or existing application code.
+
+The final objective is:
+
+**ONE COMPLETE, SECURE, FAST AND RELIABLE DIPEN SYSTEM – MANUFACTURING ERP, WITH ALL EXISTING BIRAT HEALTHCARE BUSINESS DATA AND FUNCTIONALITY PRESERVED.**

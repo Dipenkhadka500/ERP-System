@@ -1,0 +1,1193 @@
+# MASTER DEVELOPMENT PROMPT
+
+## OPERATIONS & INVENTORY MANAGEMENT ERP
+
+### Google Apps Script + Google Sheets Database
+
+Act as a Senior Google Apps Script Developer, ERP Architect, Database Designer, and Frontend Engineer.
+
+I want you to develop a complete, production-ready Operations & Inventory Management ERP system for **Birat Healthcare Industries Pvt. Ltd.**
+
+I have uploaded an Excel reference workbook named `System(1).xlsx`. You MUST carefully study its nine worksheets, existing columns, item classification, UOM conversion structure, formulas, stock calculations, and working principles before developing the application.
+
+The uploaded Excel workbook is the functional reference. Do not ignore its business logic or replace it with an unrelated inventory template.
+
+---
+
+# 1. DEVELOPMENT ARCHITECTURE
+
+Develop the application using:
+
+**Backend**
+
+- Google Apps Script (V8).
+- Google Sheets as the central database.
+- Google Apps Script SpreadsheetApp services.
+- HTML Service for web application deployment.
+- Installable triggers for synchronizing manual spreadsheet changes.
+
+**Frontend**
+
+- HTML5.
+- CSS3.
+- Vanilla JavaScript.
+- Bootstrap 5.
+- Font Awesome icons.
+- Chart.js for dashboard visualizations.
+
+**STRICT FILE REQUIREMENT**
+
+Generate the entire application in exactly TWO separate files:
+
+1. `Code.js` — Complete backend, database initialization, business logic, inventory calculations, synchronization, validation, reporting, and API functions.
+2. `Index.html` — Complete frontend, dashboard, navigation, forms, tables, modals, filters, notifications, and JavaScript.
+
+Do not create:
+
+- Additional HTML files.
+- CSS files.
+- JavaScript files.
+- Include files.
+- External backend files.
+- PHP or MySQL files.
+
+All CSS and frontend JavaScript must be inside Index.html.
+
+All server-side functions must be inside Code.js.
+
+Use `google.script.run` for frontend/backend communication.
+
+The application must be ready to deploy as a Google Apps Script Web App.
+
+# 2. GOOGLE SHEETS DATABASE STRUCTURE
+
+Use the existing workbook's nine worksheets as the foundation.
+
+Existing worksheets:
+
+1. Item Master
+2. Production
+3. Dispatch
+4. Goods Reciept
+5. Issue
+6. Finished Goods
+7. Raw Material
+8. Packing Material
+9. All Stock Balance
+
+Preserve the existing sheet names, especially `Goods Reciept`, unless an explicit configurable sheet mapping is provided.
+
+The application may create additional hidden system/database sheets where necessary for transaction records, audit trails, synchronization, settings, and stock reconciliation.
+
+However, the nine existing business worksheets must remain available.
+
+Only the four working sheets should accept routine operational entries:
+
+- Production
+- Dispatch
+- Goods Reciept
+- Issue
+
+Item Master should only be changed through its authorized master-data management interface or controlled direct spreadsheet updates.
+
+The stock registers and All Stock Balance must be system-generated and must not require manual stock adjustments.
+
+All database operations must be performed against the same connected Google Spreadsheet.
+
+Provide a configurable spreadsheet ID in Code.js.
+
+# 3. OPERATIONS MODULE
+
+Create one main navigation module named:
+
+**OPERATIONS**
+
+All of the following submodules must be placed inside this Operations module.
+
+1. Item Master
+2. Production
+3. Dispatch
+4. Goods Receipt
+5. Issue
+6. Finished Goods Stock
+7. Raw Material Stock
+8. Packing Material Stock
+9. All Stock Balance
+10. Daily Stock Report
+
+The submodules must be fully interconnected.
+
+The system must not maintain separate, unrelated item lists or stock calculations.
+
+# 4. ITEM MASTER — CENTRAL ITEM DATABASE
+
+Item Master is the most important component of this ERP.
+
+It is the SINGLE SOURCE OF TRUTH for every item used in every module.
+
+No user should be allowed to manually type or create an item name in Production, Dispatch, Goods Receipt, Issue, or stock reports.
+
+Every item must originate from Item Master.
+
+## 4.1 Item Master Fields
+
+Implement these fields:
+
+- Item Code
+- Item Name
+- Categories
+- Brand Categories
+- HSN Code
+- Index Unit
+- Fraction of Index Unit
+- Conversion Quantity (Secondary Unit)
+- Conversion Unit
+- Reorder Level
+- Status (Active/Inactive)
+- Created Date
+- Updated Date
+
+## 4.2 Fixed Item Categories
+
+The system must contain exactly these six fixed categories:
+
+1. Raw Material
+2. Packing Material
+3. Finished Goods
+4. WIP
+5. Stores & Spares
+6. Others
+
+Users must select a category from a dropdown.
+
+Users must not be able to create, rename, or change the existing fixed categories.
+
+## 4.3 Automatic Item Code Generation
+
+Generate item codes automatically based on the selected category.
+
+Use these category prefixes:
+
+\| Category | Item Code Sequence |
+\| Raw Material | 4001 onwards |
+\| Packing Material | 5001 onwards |
+\| WIP | 2001 onwards |
+\| Finished Goods | 3001 onwards |
+\| Stores & Spares | 6001 onwards |
+\| Others | 7001 onwards |
+
+Examples:
+
+- First Raw Material: 4001
+- Next Raw Material: 4002
+- First Packing Material: 5001
+- First Finished Goods: 3001
+
+The system must identify the highest existing valid item code within the category and generate the next available number.
+
+Use LockService to prevent duplicate codes when multiple users create items simultaneously.
+
+Never reuse an existing item code, even when an item is deactivated.
+
+## 4.4 Item Master Interface
+
+Create a professional Item Master management interface.
+
+Features:
+
+- Add New Item.
+- Edit Item.
+- View Item Details.
+- Activate/Deactivate Item.
+- Search by Item Code.
+- Search by Item Name.
+- Filter by Category.
+- Filter by Brand.
+- Filter by HSN Code.
+- Export item list.
+- Pagination.
+
+Prevent duplicate item codes and duplicate item names within the applicable business rules.
+
+Do not permanently delete an item that already has transaction history.
+
+Inactive items must remain visible in historical reports but must not be available for new transactions.
+
+## 4.5 UOM Conversion System
+
+UOM conversion must be globally available in all modules.
+
+The conversion fields are:
+
+- Index Unit
+- Fraction of Index Unit
+- Conversion Quantity
+- Conversion Unit
+
+For example, an item may have:
+
+Index Unit: Pkt
+Conversion Unit: Cartoon
+Conversion Quantity: 48
+
+The system must use the actual configured conversion values from Item Master, not hardcoded conversion values.
+
+Users must be able to select either the Index Unit or configured Secondary Unit.
+
+If no secondary conversion is configured, only the Index Unit should be available.
+
+Maintain all stock calculations in the item's Index Unit as the base stock unit.
+
+For secondary-unit entries, convert the transaction quantity into the Index Unit using the configured conversion rule.
+
+Do not assume that the conversion quantity or fraction field has the same mathematical meaning for every item. Implement and document one consistent conversion formula based on the Item Master configuration, with validation against the reference workbook.
+
+Show both entered quantity and converted base quantity in transaction details.
+
+Prevent invalid, zero, negative, or unsupported conversion values.\
+
+For eg :In Finished goods there should be both index unit and secondary unit. if production in entered in index unit then as from item master it should be automatically converted into secondary unit but incase of decimal like if item name mask 1 cartoon = 48 pkt suppose production is entered 60 pkt then system should like that total production should be divided by 48 and the quotient should be term as secondary unit and reminder should not be in decimal rather than it should in index unit which should waits for to complete 48 pkt for being converted to 1 secondary unit for 60 pkt it should be 1 cartoon and then 12 pkt and this should be apply in others too if that item is appearing in other module and report that should be work like that.
+
+
+# 5. FOUR WORKING SHEETS — OPERATIONAL ENTRY MODULES
+
+These four modules are the operational entry points of the ERP.
+
+All entries must be stored in Google Sheets and reflected in the stock registers automatically.
+
+The user must be able to work through either:
+
+1. The ERP web application.
+2. Direct manual entry in the corresponding Google Sheets working worksheet.
+
+Both entry methods must synchronize with the same inventory database.
+
+## Common Working Sheet Features
+
+Every working module must support:
+
+- Item search autocomplete.
+- Category filtering.
+- Brand filtering.
+- Item Code auto-population.
+- Item Name auto-population.
+- UOM dropdown based on Item Master.
+- Date selection.
+- Quantity entry.
+- Daily transaction records.
+- Search and filtering.
+- Edit existing records.
+- Delete or cancel transactions with audit history.
+- Transaction reference number.
+- Remarks.
+- User and timestamp tracking.
+
+**IMPORTANT ITEM SELECTION RULE**
+
+When the user searches for an item or selects a category, display only the matching active items from Item Master.
+
+The user must select an existing item.
+
+Do not use a free-text Item Name input.
+
+Once selected, automatically populate:
+
+- Item Code.
+- Item Name.
+- Category.
+- Brand.
+- Index Unit.
+- Secondary Unit, if configured.
+
+The item code must be stored as the permanent reference for all inventory calculations.
+
+# 6. PRODUCTION MODULE — STOCK IN
+
+Production records must increase Finished Goods stock.
+
+Fields:
+
+- Production ID (automatic).
+- Production Date.
+- Item Category.
+- Item Search.
+- Item Code.
+- Item Name (read-only).
+- Brand.
+- Quantity.
+- UOM.
+- Converted Quantity in Index Unit.
+- Batch/Lot Number.
+- Production Reference.
+- Remarks.
+- Created By.
+- Created At.
+
+Item selection should support the categories allowed by the reference Production sheet: Packing Material, WIP, and Finished Goods, with configurable category validation.
+
+**Stock effect:**
+
+When a valid production transaction is saved:
+
+Increase the corresponding Finished Goods stock by the converted quantity in the item's Index Unit.
+
+If production transactions involve WIP or Packing Material items, do not silently classify them as Finished Goods. Apply the configured category-specific stock rules and flag invalid production classifications.
+
+The system must automatically reflect the entry in the relevant stock register.
+
+# 7. GOODS RECEIPT MODULE — STOCK IN
+
+This module records incoming inventory.
+
+Fields:
+
+- Receipt ID (automatic).
+- Receipt Date.
+- Item Category.
+- Item Search.
+- Item Code.
+- Item Name (read-only).
+- Brand.
+- Received Quantity.
+- UOM.
+- Converted Quantity in Index Unit.
+- Supplier Name (optional).
+- Invoice Number (optional).
+- Purchase Reference (optional).
+- Batch/Lot Number.
+- Remarks.
+- Created By.
+- Created At.
+
+Allow receipt of:
+
+- Raw Material.
+- Packing Material.
+- Finished Goods.
+- WIP.
+- Stores & Spares.
+- Others.
+
+**Stock effect:**
+
+When a Goods Receipt transaction is saved:
+
+- Raw Material increases in Raw Material Stock.
+- Packing Material increases in Packing Material Stock.
+- Finished Goods increases in Finished Goods Stock.
+- WIP, Stores & Spares, and Others increase in their respective category-based stock records.
+
+Goods Receipt must never add stock to the wrong category.
+
+Every receipt must be traceable to its transaction ID.
+
+# 8. DISPATCH MODULE — STOCK OUT
+
+Dispatch records must reduce Finished Goods inventory.
+
+Fields:
+
+- Dispatch ID (automatic).
+- Dispatch Date.
+- Item Search.
+- Item Code.
+- Item Name (read-only).
+- Brand.
+- Dispatch Quantity.
+- UOM.
+- Converted Quantity in Index Unit.
+- Customer/Party Name.
+- Challan Number.
+- Invoice Number.
+- Vehicle Number (optional).
+- Remarks.
+- Created By.
+- Created At.
+
+The reference workbook uses Brand Categories and two dispatch quantity columns, including CTN and Pkt.
+
+Preserve this dual-UOM capability where applicable, but derive the actual available units from Item Master.
+
+**Stock effect:**
+
+When dispatch is saved:
+
+Reduce the corresponding Finished Goods stock.
+
+The system must validate available stock before allowing dispatch.
+
+Do not allow negative stock unless an authorized administrator explicitly enables an exceptional override.
+
+If the entered quantity is in a secondary unit, convert it before reducing stock.
+
+# 9. ISSUE MODULE — STOCK OUT
+
+This module records material issued from inventory.
+
+Fields:
+
+- Issue ID (automatic).
+- Issue Date.
+- Item Category.
+- Item Search.
+- Item Code.
+- Item Name (read-only).
+- Brand.
+- Issue Quantity.
+- UOM.
+- Converted Quantity in Index Unit.
+- Department/Production Section.
+- Issue Reference.
+- Issued To.
+- Remarks.
+- Created By.
+- Created At.
+
+Allow the user to search and select items from the following categories:
+
+- Raw Material.
+- Packing Material.
+- Finished Goods, only where explicitly authorized.
+- WIP.
+- Stores & Spares.
+- Others.
+
+**Stock effect:**
+
+- Raw Material issue decreases Raw Material Stock.
+- Packing Material issue decreases Packing Material Stock.
+- Finished Goods issue decreases Finished Goods Stock if authorized.
+- WIP and other categories decrease their respective stock records.
+
+Validate stock availability before saving.
+
+Never reduce an unrelated category's stock.
+
+# 10. CENTRAL INVENTORY TRANSACTION ENGINE
+
+This is the most important backend component.
+
+Create a centralized transaction-processing engine.
+
+All four working modules must use the same engine.
+
+Do not write separate, inconsistent stock-calculation logic for each module.
+
+Create a normalized transaction ledger in a hidden Google Sheet.
+
+Suggested fields:
+
+- Transaction ID.
+- Transaction Type.
+- Transaction Date.
+- Item Code.
+- Item Name (snapshot for historical display).
+- Category.
+- Brand.
+- Entered Quantity.
+- Entered UOM.
+- Converted Base Quantity.
+- Stock Direction.
+- Source Sheet.
+- Source Row/Reference.
+- Batch Number.
+- Reference Number.
+- Remarks.
+- Created By.
+- Created At.
+- Updated At.
+- Transaction Status.
+
+Transaction types:
+
+- PRODUCTION.
+- GOODS_RECEIPT.
+- DISPATCH.
+- ISSUE.
+- OPENING_STOCK.
+- ADJUSTMENT, restricted to authorized users.
+
+Use the following stock calculation:
+
+Closing Stock = Opening Stock + Total Stock In - Total Stock Out.
+
+Production and Goods Receipt are stock-in transactions.
+
+Dispatch and Issue are stock-out transactions.
+
+Apply category-specific stock routing.
+
+## Critical editing and synchronization logic
+
+Do not simply add stock every time an existing working-sheet cell is edited.
+
+This will create duplicate stock.
+
+Instead:
+
+1. Give every transaction a permanent unique ID.
+2. When a transaction is created, register it in the ledger.
+3. When an existing transaction is edited, update the original transaction or reverse its previous effect before applying the new effect.
+4. When a transaction is deleted, cancel it or reverse its effect.
+5. Recalculate stock from valid ledger transactions.
+6. Prevent duplicate processing of the same source record.
+7. Preserve an audit trail of all modifications.
+
+Use transaction IDs and source references to make processing idempotent.
+
+Use LockService around critical write operations.
+
+For multi-step transactions, implement validation and rollback/error handling so partially completed operations cannot silently corrupt stock.
+
+# 11. DIRECT GOOGLE SHEETS EDIT SYNCHRONIZATION
+
+The four operational worksheets must also support manual spreadsheet entry.
+
+If an authorized user enters, changes, or clears transaction data directly in:
+
+- Production.
+- Dispatch.
+- Goods Reciept.
+- Issue.
+
+The system must detect the change and synchronize the transaction database and stock registers.
+
+Implement:
+
+- Installable onEdit trigger.
+- Installable onChange trigger only where appropriate.
+- A controlled synchronization mechanism.
+- A synchronization status.
+- Duplicate prevention.
+- Error logging.
+- Reconciliation functions.
+
+Do not rely on a simple onEdit trigger for every possible spreadsheet change.
+
+Account for:
+
+- Single-cell edits.
+- Pasted ranges.
+- Multiple-row pastes.
+- Cleared cells.
+- Formula changes.
+- Script-generated updates.
+
+Google Apps Script triggers do not fire in every situation, particularly for programmatic changes. Therefore, implement explicit synchronization in backend functions that write data, plus a periodic reconciliation process for missed changes.
+
+For direct manual entry, use a clearly defined input schema and validate the item code against Item Master.
+
+Do not trust a manually typed item name or item code without checking the master database.
+
+For the web application, prevent duplicate processing when backend code writes to a working sheet and also creates its ledger transaction.
+
+If an entry is invalid, do not silently accept it. Record an error and clearly identify the problematic row.
+
+# 12. STOCK REGISTERS
+
+Create three fully automated stock-register modules based on the workbook.
+
+## 12.1 Finished Goods
+
+Columns:
+
+- Item Name.
+- Item Code.
+- Opening Stock.
+- Production.
+- Dispatch.
+- Closing Stock.
+- Index Unit.
+- Secondary Unit, where configured.
+
+The closing stock must calculate automatically.
+
+Daily stock logic:
+
+Opening Stock + Production - Dispatch = Closing Stock.
+
+## 12.2 Raw Material
+
+Columns:
+
+- Item Name.
+- Item Code.
+- Opening Stock.
+- Receipt.
+- Issue.
+- Closing Stock.
+- Index Unit.
+
+Daily stock logic:
+
+Opening Stock + Receipt - Issue = Closing Stock.
+
+## 12.3 Packing Material
+
+Columns:
+
+- Item Name.
+- Item Code.
+- Opening Stock.
+- Receipt.
+- Issue.
+- Closing Stock.
+- Index Unit.
+
+Daily stock logic:
+
+Opening Stock + Receipt - Issue = Closing Stock.
+
+All three stock registers must automatically retrieve their item names, codes, categories, and units from Item Master.
+
+Users must not manually modify calculated stock values.
+
+Provide filters for:
+
+- Item.
+- Item Code.
+- Category.
+- Brand.
+- Date.
+- Month.
+- Year.
+
+Show opening stock, daily movement, and closing stock.
+
+# 13. ALL STOCK BALANCE
+
+Create a consolidated All Stock Balance interface and Google Sheet.
+
+It must show three main sections:
+
+A. FINISHED GOODS
+B. RAW MATERIAL
+C. PACKING MATERIAL
+
+For each item, show:
+
+- Item Name.
+- Item Code.
+- Brand.
+- Category.
+- Index Unit.
+- Opening Stock.
+- Total Stock In.
+- Total Stock Out.
+- Closing Stock.
+- Reorder Level.
+- Stock Status.
+
+Display stock in the appropriate units.
+
+For items with a secondary UOM, display the available balance in the configured secondary unit where conversion is valid, alongside the base Index Unit balance.
+
+The dashboard must never calculate stock independently of the central transaction ledger.
+
+All Stock Balance must always reflect the latest valid transactions.
+
+# 14. DAILY STOCK REPORT
+
+Develop a dedicated Daily Stock Report module.
+
+The user must be able to select a date and generate a complete stock report.
+
+Report must include:
+
+1. Finished Goods Stock.
+2. Raw Material Stock.
+3. Packing Material Stock.
+
+For each category, show:
+
+- Item Code.
+- Item Name.
+- Brand.
+- Opening Stock.
+- Production/Receipt.
+- Dispatch/Issue.
+- Closing Stock.
+- Index Unit.
+- Secondary Unit, where applicable.
+
+Provide summary statistics:
+
+- Total number of active items.
+- Total stock-in transactions.
+- Total stock-out transactions.
+- Items below reorder level.
+- Items with zero balance.
+- Total stock by category, using clearly identified units.
+
+The report should support:
+
+- Generate Report.
+- Preview.
+- Print.
+- Export to PDF.
+- Export to Excel-compatible format.
+- Download.
+- Date-wise historical reporting.
+- Daily report submission/confirmation.
+- User and submission timestamp.
+
+A submitted daily report must preserve its reporting date and submission history.
+
+Do not change historical reports when new transactions are entered later. Historical reports must be generated from transactions up to the selected date, or stored as an immutable submitted snapshot.
+
+# 15. OPERATIONS DASHBOARD
+
+Create a professional dashboard as the landing page of the Operations module.
+
+Display:
+
+Summary Cards:
+
+- Total Active Items.
+- Finished Goods Balance.
+- Raw Material Balance.
+- Packing Material Balance.
+- Today's Production.
+- Today's Goods Receipt.
+- Today's Dispatch.
+- Today's Issue.
+- Low Stock Items.
+- Pending Synchronization Errors.
+
+Charts:
+
+- Daily Production vs Dispatch.
+- Daily Goods Receipt vs Issue.
+- Category-wise Stock Summary.
+- Top 10 Stock Items.
+- Low Stock Analysis.
+- Monthly Inventory Movement.
+
+Recent Activity Table:
+
+- Transaction ID.
+- Date.
+- Item.
+- Category.
+- Transaction Type.
+- Quantity.
+- UOM.
+- User.
+- Status.
+
+All dashboard information must come from the live Google Sheets database.
+
+# 16. REAL-TIME / AUTOMATIC REFRESH
+
+The application must be fast and responsive.
+
+Implement a practical synchronization and refresh architecture.
+
+Requirements:
+
+- Refresh dashboard data automatically.
+- Refresh stock balance after every successful transaction.
+- Refresh relevant tables without reloading the entire page.
+- Automatically refresh data after a user submits a transaction.
+- Update data when another user changes the spreadsheet.
+- Show last synchronization time.
+- Show connection status.
+- Show loading indicators during server requests.
+- Prevent duplicate form submissions.
+- Handle network failures and retry safely.
+- Do not continuously reload Index.html.
+
+Use efficient batch reads and writes through Google Apps Script.
+
+Avoid calling SpreadsheetApp repeatedly inside loops.
+
+Use CacheService for relatively static data such as Item Master dropdown information, with proper invalidation whenever Item Master changes.
+
+Use a configurable refresh interval and lightweight polling for updates from other users.
+
+Use a version number or last-updated timestamp to avoid reloading unchanged data.
+
+Do not claim true push-based real-time synchronization if using polling. Explain the actual refresh interval and provide an option to refresh manually.
+
+# 17. PROFESSIONAL FRONTEND DESIGN
+
+Create a modern enterprise-style ERP interface.
+
+Design direction:
+
+- Professional manufacturing ERP.
+- Dark navy sidebar.
+- Clean white/light-grey workspace.
+- Blue accent color.
+- Modern dashboard cards.
+- Rounded tables and forms.
+- Responsive design.
+- Desktop-first but mobile-compatible.
+
+Suggested color palette:
+
+- Primary: #0F172A.
+- Secondary: #1E293B.
+- Accent: #2563EB.
+- Background: #F8FAFC.
+- Success: #16A34A.
+- Warning: #F59E0B.
+- Danger: #DC2626.
+
+Sidebar:
+
+- Dashboard.
+- OPERATIONS.
+  - Item Master.
+  - Production.
+  - Dispatch.
+  - Goods Receipt.
+  - Issue.
+  - Finished Goods.
+  - Raw Material.
+  - Packing Material.
+  - All Stock Balance.
+  - Daily Stock Report.
+
+The sidebar should support expandable navigation.
+
+Create reusable frontend functions for:
+
+- Search.
+- Dropdowns.
+- Data tables.
+- Pagination.
+- Modal forms.
+- Notifications.
+- Loading states.
+- Date filters.
+- Export.
+- Refresh.
+
+The system should not use browser alerts for ordinary notifications. Use attractive toast messages and confirmation modals.
+
+# 18. USER ACCESS AND SECURITY
+
+Create a basic role-based access control system.
+
+Suggested roles:
+
+1. Super Admin.
+2. Operations Manager.
+3. Store Officer.
+4. Production Officer.
+5. Dispatch Officer.
+6. Viewer.
+
+Permissions must control:
+
+- Item Master management.
+- Production entry.
+- Goods Receipt entry.
+- Dispatch entry.
+- Issue entry.
+- Stock viewing.
+- Report generation.
+- Report submission.
+- Stock adjustment.
+- Transaction editing and cancellation.
+
+Validate permissions on the backend, not only by hiding frontend buttons.
+
+Record user activity and changes in an Audit Log.
+
+Use Google account identity only where reliably available in the deployment configuration. Do not assume Session.getActiveUser().getEmail() always returns an email.
+
+Do not expose spreadsheet IDs, sensitive configuration, or administrative functions to unauthorized users.
+
+# 19. DATABASE INITIALIZATION
+
+Create a `setupSystem()` function.
+
+It must:
+
+1. Connect to the configured Google Spreadsheet.
+2. Check all nine existing sheets.
+3. Create missing business sheets only when necessary.
+4. Preserve existing valid data.
+5. Create the required hidden system sheets.
+6. Initialize database headers.
+7. Validate Item Master records.
+8. Configure triggers.
+9. Initialize system settings.
+10. Create the required indexes or lookup structures.
+11. Run initial stock reconciliation.
+12. Return a detailed setup report.
+
+Never delete or overwrite existing user data during initialization.
+
+Create a separate backup function before major migration or database restructuring.
+
+Support both a new database and an existing workbook containing historical records.
+
+Provide a safe migration function to import existing working-sheet entries into the transaction ledger without double-counting them.
+
+# 20. BACKEND FUNCTIONS REQUIRED IN Code.js
+
+Organize the backend into clearly documented sections.
+
+Implement functions such as:
+
+CONFIGURATION:
+
+- getSpreadsheet()
+- setupSystem()
+- getSystemStatus()
+- getDatabaseHealth()
+
+ITEM MASTER:
+
+- getAllItems()
+- searchItems()
+- getItemByCode()
+- addItem()
+- updateItem()
+- setItemStatus()
+- generateItemCode()
+- getCategories()
+- getItemUOM()
+
+TRANSACTION ENGINE:
+
+- createTransaction()
+- updateTransaction()
+- cancelTransaction()
+- validateTransaction()
+- convertToBaseUnit()
+- getTransactionById()
+- getTransactionHistory()
+
+WORKING SHEETS:
+
+- saveProduction()
+- saveDispatch()
+- saveGoodsReceipt()
+- saveIssue()
+- getProductionRecords()
+- getDispatchRecords()
+- getGoodsReceiptRecords()
+- getIssueRecords()
+
+SYNCHRONIZATION:
+
+- installTriggers()
+- handleSpreadsheetEdit(e)
+- syncWorkingSheets()
+- reconcileInventory()
+- getSyncStatus()
+
+INVENTORY:
+
+- getFinishedGoodsStock()
+- getRawMaterialStock()
+- getPackingMaterialStock()
+- getAllStockBalance()
+- getStockByItem()
+- getStockMovement()
+- getLowStockItems()
+
+REPORTING:
+
+- generateDailyStockReport()
+- submitDailyReport()
+- getHistoricalReport()
+- exportReport()
+- getDashboardData()
+
+AUDIT:
+
+- writeAuditLog()
+- getAuditLogs()
+
+FRONTEND:
+
+- doGet()
+- include() only if required, but do not create any additional HTML files.
+
+All functions must be fully implemented.
+
+Do not provide empty functions, placeholder functions, pseudocode, or comments saying that a feature will be implemented later.
+
+# 21. PERFORMANCE REQUIREMENTS
+
+Performance is a priority.
+
+Implement:
+
+- Batch getValues().
+- Batch setValues().
+- Minimal SpreadsheetApp service calls.
+- CacheService.
+- LockService.
+- Efficient object-based item lookups.
+- Transaction ID indexing.
+- Pagination.
+- Server-side filtering.
+- Lightweight API responses.
+- Asynchronous frontend requests.
+- Debounced item searching.
+- Minimal DOM rendering.
+- Incremental dashboard refresh.
+
+Do not read an entire spreadsheet repeatedly to retrieve a single item.
+
+Avoid unnecessary formulas across hundreds of thousands of rows.
+
+Use a normalized transaction database as the source of truth and generate stock views efficiently.
+
+# 22. ERROR HANDLING AND DATA INTEGRITY
+
+The system must handle:
+
+- Invalid item codes.
+- Inactive items.
+- Duplicate transaction IDs.
+- Missing required fields.
+- Invalid dates.
+- Invalid UOM.
+- Invalid conversions.
+- Insufficient stock.
+- Duplicate submissions.
+- Concurrent users.
+- Spreadsheet access errors.
+- Partial synchronization.
+- Deleted working-sheet rows.
+- Historical transaction edits.
+
+Every backend function must return a consistent response format:
+
+{
+success: true or false,
+message: "Descriptive message",
+data: {},
+timestamp: "ISO timestamp"
+}
+
+Never report a transaction as successful until the database write has completed.
+
+Never allow a failed transaction to silently change inventory.
+
+Provide an administrator reconciliation tool that compares ledger-derived stock with the stock registers and reports discrepancies.
+
+# 23. REQUIRED TEST CASES
+
+Before considering development complete, implement and verify these scenarios:
+
+TEST 1 — Item Master:
+Create a new Raw Material item. Confirm that its item code is generated automatically and its name appears in the other modules' search results.
+
+TEST 2 — Goods Receipt:
+Receive 100 KG of a Raw Material item. Confirm Raw Material Stock increases by 100 KG.
+
+TEST 3 — Packing Material Receipt:
+Receive 50 rolls of a Packing Material item. Confirm Packing Material Stock increases.
+
+TEST 4 — Production:
+Record production of 500 packets of a Finished Goods item. Confirm Finished Goods Stock increases by 500 packets.
+
+TEST 5 — Dispatch:
+Dispatch 100 packets of the same item. Confirm the remaining stock is 400 packets.
+
+TEST 6 — Issue:
+Issue 20 KG of the Raw Material item. Confirm remaining stock is 80 KG.
+
+TEST 7 — UOM:
+Record a receipt in the configured secondary unit. Confirm the base-unit conversion is correct.
+
+TEST 8 — Transaction Editing:
+Change a previously recorded receipt from 100 KG to 120 KG. Confirm stock becomes 120 KG, not 220 KG.
+
+TEST 9 — Transaction Cancellation:
+Cancel a transaction. Confirm its effect is reversed exactly once and its history is preserved.
+
+TEST 10 — Manual Spreadsheet Entry:
+Enter a valid receipt directly into the Goods Reciept worksheet. Confirm it synchronizes to the ledger and stock register.
+
+TEST 11 — Duplicate Protection:
+Edit or paste the same working-sheet record more than once. Confirm stock is not added repeatedly.
+
+TEST 12 — Insufficient Stock:
+Attempt to dispatch more than available stock. Confirm the transaction is rejected unless an authorized override is enabled.
+
+TEST 13 — Daily Report:
+Generate a report for a selected date and verify opening, stock-in, stock-out, and closing balances.
+
+TEST 14 — Historical Accuracy:
+Generate yesterday's report after entering today's transactions. Confirm yesterday's closing stock does not change.
+
+TEST 15 — Concurrent Entries:
+Submit transactions from multiple users. Confirm no duplicate IDs, lost updates, or corrupted balances.
+
+# 24. IMPORTANT BUSINESS RULES
+
+These rules are mandatory:
+
+1. Item Master is the only source of item names and codes.
+2. No manual item name creation in operational modules.
+3. All categories must come from the fixed Item Master category list.
+4. All UOM conversions must come from Item Master.
+5. Every transaction must reference a valid Item Code.
+6. Production and Goods Receipt increase inventory according to category-specific routing.
+7. Dispatch and Issue decrease inventory according to category-specific routing.
+8. Stock must be calculated from the central transaction ledger.
+9. Editing an old transaction must not double-count stock.
+10. Direct spreadsheet changes must be synchronized safely.
+11. Historical stock reports must remain accurate.
+12. All Stock Balance must always reflect valid transactions.
+13. Only the four working sheets are routine operational transaction-entry sheets.
+14. Stock registers must be system-controlled.
+15. No existing workbook data may be destroyed during setup.
+
+# 25. FINAL OUTPUT INSTRUCTIONS
+
+Now develop the complete application.
+
+First, internally analyze the reference workbook and design the database architecture.
+
+Then generate the complete source code in two separate outputs:
+
+**FILE 1: Code.js**
+
+Provide the entire working backend code.
+
+**FILE 2: Index.html**
+
+Provide the entire working frontend code.
+
+Do not omit any required functions.
+
+Do not shorten the code using phrases such as:
+
+- "Continue similarly."
+- "Add remaining functions here."
+- "Implementation omitted."
+- "Use your existing code."
+- "Write the rest yourself."
+
+Do not produce a demonstration-only application.
+
+Do not provide mock transaction data as if it were live database information.
+
+The generated application must actually connect to Google Sheets, retrieve Item Master records, save transactions, synchronize stock, and generate reports.
+
+If the response limit is reached, finish the current file at a complete logical boundary and explicitly state which file and section must be continued. Do not truncate code or mix the two files.
+
+Finally, provide:
+
+1. Code.js
+2. Index.html
+3. Google Spreadsheet setup instructions.
+4. Deployment instructions.
+5. Trigger installation instructions.
+6. Testing checklist.
+7. Explanation of how the four working sheets synchronize with stock registers.
+8. Instructions for updating the system without losing existing database records.
+
+**FINAL DEVELOPMENT PRIORITY: DATA ACCURACY FIRST, TRANSACTION INTEGRITY SECOND, PERFORMANCE THIRD, AND FRONTEND DESIGN FOURTH.**
+
+Build a genuinely functional, interconnected Operations ERP, not just a visually attractive dashboard.

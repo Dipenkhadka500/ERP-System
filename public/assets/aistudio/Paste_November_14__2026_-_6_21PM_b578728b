@@ -1,0 +1,2528 @@
+/**
+ * ============================================================================
+ * KHADKA SYSTEM - MANUFACTURING ERP
+ * Integrated original ERP with replacement BOM & Production modules
+ * Client: Birat Healthcare Industries Pvt. Ltd.
+ *
+ * Integration rule:
+ * - All original non-BOM/non-Production modules are retained.
+ * - Legacy BOM and Production implementation is replaced.
+ * - BOM/Production use the original ERP spreadsheet connection.
+ * ============================================================================
+ */
+
+/**
+ * ============================================================================
+ * KHADKA'S SYSTEM - MANUFACTURING ERP
+ * Comprehensive Google Apps Script Backend
+ * Client: Birat Healthcare 
+ * Architecture: Google Sheets Database + Apps Script Web App Engine
+ * ============================================================================
+ */
+
+// Global Configuration
+var SCRIPT_PROP = PropertiesService.getScriptProperties();
+
+// Connected Google Spreadsheet ID
+var ERP_SPREADSHEET_ID = '16sCJTkbQzWp_ufX3Wp7sqMhiDGNsUTAfWh9mqR2zPs4';
+
+// Default Exchange Rates (Base Currency: NPR)
+var DEFAULT_EXCHANGE_RATES = {
+  USD: 135.50,
+  INR: 1.6,
+  EUR: 146.20,
+  NPR: 1.00,
+  GBP: 172.80,
+  CNY: 18.60
+};
+
+/**
+ * Web App Entry Point
+ */
+function doGet(e) {
+  var template = HtmlService.createTemplateFromFile('Index');
+  template.appUrl = ScriptApp.getService().getUrl();
+  return template.evaluate()
+    .setTitle('Khadka System - Manufacturing ERP')
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1.0')
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+}
+
+/**
+ * Returns active spreadsheet instance with fallback to configured spreadsheet.
+ * Does not create a new spreadsheet when the configured spreadsheet is available.
+ */
+function getDatabase() {
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    if (ss) return ss;
+  } catch (err) {
+    // Unbound standalone execution
+  }
+
+  var sheetId = SCRIPT_PROP.getProperty('ERP_SHEET_ID') || ERP_SPREADSHEET_ID;
+
+  if (sheetId) {
+    try {
+      return SpreadsheetApp.openById(sheetId);
+    } catch (e) {
+      throw new Error('Unable to access configured ERP spreadsheet: ' + e.message);
+    }
+  }
+
+  throw new Error('ERP Spreadsheet ID is not configured.');
+}
+/**
+ * Set target Spreadsheet ID manually
+ */
+function setTargetSpreadsheetId(sheetId) {
+  try {
+    var ss = SpreadsheetApp.openById(sheetId);
+
+    SCRIPT_PROP.setProperty('ERP_SHEET_ID', sheetId);
+
+    return {
+      success: true,
+      message: 'Connected to spreadsheet: ' + ss.getName(),
+      spreadsheetUrl: ss.getUrl()
+    };
+
+  } catch (err) {
+    throw new Error(
+      'Failed to open spreadsheet with ID ' + sheetId + ': ' + err.message
+    );
+  }
+}
+
+/**
+ * System Setup: Automatically initializes all 19 sheets with headers, formatting & initial masters
+ * Does NOT overwrite existing records.
+ */
+
+function connectERPDatabase() {
+  return setTargetSpreadsheetId('16sCJTkbQzWp_ufX3Wp7sqMhiDGNsUTAfWh9mqR2zPs4');
+}
+
+function setupERP() {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+
+  try {
+    var ss = getDatabase();
+
+    var sheetSchemas = {
+      'Dashboard': ['MetricKey', 'MetricValue', 'Category', 'LastUpdated'],
+      'Indents': [
+        'IndentNo', 'Date', 'Department', 'Requester', 'ItemCode', 'ItemName',
+        'RequiredQty', 'Unit', 'RequiredDeliveryDate', 'Priority', 'Status',
+        'ApprovedBy', 'ApprovalDate', 'Remarks', 'Timestamp'
+      ],
+      'Suppliers': [
+        'SupplierId', 'Name', 'PanNo', 'GstNo', 'ContactPerson', 'Phone',
+        'Email', 'Country', 'Address', 'PaymentTerms', 'Currency',
+        'LeadTimeDays', 'Rating', 'Timestamp'
+      ],
+      'FreightForwarder': [
+        'ForwarderId', 'Name', 'Address', 'ContactPerson', 'Phone',
+        'Email', 'Rating', 'Remarks', 'Timestamp'
+      ],
+      'Quotations': [
+        'QuotationNo', 'IndentNo', 'SupplierId', 'SupplierName', 'Date',
+        'ValidityDate', 'Currency', 'ExchangeRate', 'Incoterms',
+        'FreightCharges', 'OtherCharges', 'Subtotal', 'TotalAmount',
+        'TotalAmountNPR', 'Status', 'MDApproval', 'MDApprovalDate',
+        'MDNotes', 'AttachmentName', 'AttachmentUrl', 'ItemsJSON', 'Timestamp'
+      ],
+      'PurchaseOrders': [
+        'PONo', 'QuotationNo', 'SupplierId', 'SupplierName', 'OrderDate',
+        'DeliveryTerms', 'PaymentTerms', 'Incoterms', 'Currency',
+        'ExchangeRate', 'TotalValue', 'TotalValueNPR', 'ExpectedDeliveryDate',
+        'Status', 'ApprovalStatus', 'ItemsJSON', 'ReceivedStatus',
+        'ReceivedQty', 'PendingQty', 'Timestamp'
+      ],
+      'LCTTPayments': [
+        'PaymentId', 'PONo', 'SupplierName', 'BankName', 'PaymentType',
+        'Currency', 'Amount', 'ExchangeRate', 'AmountNPR', 'LCNumber',
+        'LCOpeningDate', 'MaturityDate', 'Status', 'PaymentStage',
+        'Remarks', 'Timestamp'
+      ],
+      'Shipments': [
+        'ShipmentId', 'PONo', 'SupplierName', 'ForwarderId', 'ForwarderName',
+        'ShippingLine', 'OriginType', 'OriginCountry', 'POL', 'POD',
+        'ContainerNo', 'BLAWBNo', 'ETD', 'ETA', 'ActualDeparture',
+        'ActualArrival', 'CustomsStatus', 'FreightAmountNPR', 'ShipmentStatus',
+        'Remarks', 'Timestamp'
+      ],
+      'Tenders': [
+        'TenderNo', 'TenderName', 'Address', 'ContactInfo', 'PublicationDate',
+        'SubmissionDeadline', 'ItemName', 'Quantity', 'Unit', 'EstimatedRate',
+        'BidSecurityAmount', 'BidSecurityStatus', 'Result', 'Remarks', 'Timestamp'
+      ],
+      'TenderTracking': [
+        'TrackingId', 'TenderNo', 'TenderName', 'Address', 'ContactInfo',
+        'LastSubmissionDate', 'ItemName', 'Unit', 'Quantity', 'RateIncVat',
+        'Amount', 'MuchulkaStatus', 'MuchulkaDate', 'LOIStatus', 'LOIDate',
+        'LOAStatus', 'LOADate', 'PGStatus', 'PGDate', 'SampleStatus',
+        'SampleDate', 'ProductionStatus', 'DispatchStatus', 'DispatchDate',
+        'Remarks', 'Timestamp'
+      ],
+      'Items': [
+        'ItemCode', 'ItemName', 'Category', 'Unit', 'UOMConversion',
+        'HSNCode', 'ReorderLevel', 'StandardCostNPR', 'CurrentStock',
+        'StockValueNPR', 'Warehouse', 'Timestamp'
+      ],
+      'Inventory': [
+        'TxId', 'TxDate', 'ItemCode', 'ItemName', 'Category', 'TxType',
+        'ReferenceNo', 'Warehouse', 'QtyIn', 'QtyOut', 'BalanceAfter',
+        'UnitCostNPR', 'TotalValueNPR', 'BatchNo', 'StorageLocation',
+        'MfgDate', 'ExpDate', 'LoggedBy', 'Timestamp'
+      ],
+      'Warehouses': [
+        'WarehouseId', 'WarehouseName', 'Location', 'Capacity', 'Manager',
+        'ContactPhone', 'Status', 'Timestamp'
+      ],
+
+      'Dispatch': [
+        'DispatchNo', 'DispatchDate', 'CustomerName', 'DestinationAddress',
+        'Warehouse', 'VehicleNo', 'DriverName', 'DriverContact',
+        'DeliveryChallanNo', 'ItemsJSON', 'TotalQty', 'Status',
+        'Remarks', 'LoggedBy', 'Timestamp'
+      ],
+      'Users': [
+        'UserId', 'Email', 'FullName', 'Role', 'Department', 'Status', 'Timestamp'
+      ],
+      'Roles': [
+        'RoleName', 'Description', 'PermissionsJSON', 'Timestamp'
+      ],
+      'AuditLog': [
+        'LogId', 'Timestamp', 'UserEmail', 'Action', 'Module', 'RecordId', 'Details'
+      ],
+      'Settings': [
+        'Key', 'Value', 'Description', 'UpdatedAt'
+      ]
+    };
+
+    var sheetsCreated = [];
+
+    for (var sheetName in sheetSchemas) {
+      var sheet = ss.getSheetByName(sheetName);
+      var headers = sheetSchemas[sheetName];
+
+      if (!sheet) {
+        sheet = ss.insertSheet(sheetName);
+        sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+        formatHeaderRow(sheet, headers.length);
+        sheetsCreated.push(sheetName);
+      } else {
+        // Ensure header row exists
+        if (sheet.getLastRow() === 0) {
+          sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+          formatHeaderRow(sheet, headers.length);
+        }
+      }
+    }
+
+    // Seed master defaults if tables are empty
+    seedInitialData(ss);
+
+    // Initialize the replacement BOM and Production module sheets.
+    initializeDatabase(true);
+
+    logAudit('SYSTEM_SETUP', 'System', 'ALL', 'ERP Sheets initialized and verified');
+
+    return {
+      success: true,
+      message: 'Khadka System ERP database initialized successfully. Sheets verified: ' + Object.keys(sheetSchemas).length,
+      spreadsheetUrl: ss.getUrl()
+    };
+  } catch (err) {
+    throw new Error('setupERP error: ' + err.message);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * Header styling with Dark Navy #0f172a and White text
+ */
+function formatHeaderRow(sheet, colCount) {
+  var headerRange = sheet.getRange(1, 1, 1, colCount);
+  headerRange.setBackground('#0f172a')
+    .setFontColor('#ffffff')
+    .setFontWeight('bold')
+    .setFontFamily('Segoe UI')
+    .setFontSize(10);
+  sheet.setFrozenRows(1);
+}
+
+/**
+ * Seed initial baseline data (Items, Warehouses, Roles, Settings) without overwriting
+ */
+function seedInitialData(ss) {
+  // Settings
+  var settingsSheet = ss.getSheetByName('Settings');
+  if (settingsSheet && settingsSheet.getLastRow() <= 1) {
+    var defaultSettings = [
+      ['COMPANY_NAME', 'Birat Healthcare Industries Pvt. Ltd.', 'Company Legal Name', new Date().toISOString()],
+      ['BASE_CURRENCY', 'NPR', 'Base Financial Currency', new Date().toISOString()],
+      ['EXCHANGE_RATE_USD', '135.50', 'USD to NPR Exchange Rate', new Date().toISOString()],
+      ['EXCHANGE_RATE_INR', '1.6015', 'INR to NPR Exchange Rate (100 INR = 160.15 NPR)', new Date().toISOString()],
+      ['EXCHANGE_RATE_EUR', '146.20', 'EUR to NPR Exchange Rate', new Date().toISOString()],
+      ['EXCHANGE_RATE_GBP', '172.80', 'GBP to NPR Exchange Rate', new Date().toISOString()],
+      ['APP_VERSION', '2.5.0-ENTERPRISE', 'Current App Release', new Date().toISOString()],
+      ['LOW_STOCK_THRESHOLD_DEFAULT', '100', 'Global reorder trigger threshold', new Date().toISOString()]
+    ];
+    settingsSheet.getRange(2, 1, defaultSettings.length, 4).setValues(defaultSettings);
+  }
+
+  // Warehouses
+  var whSheet = ss.getSheetByName('Warehouses');
+  if (whSheet && whSheet.getLastRow() <= 1) {
+    var defaultWarehouses = [
+      ['FG-01', 'Raw Material Warehouse (Biratnagar)', 'Biratnagar Industrial Estate', '50,000 MT', 'Ramesh Sharma', '+977-9852011111', 'Active', new Date().toISOString()],
+      ['FG-02', 'Finished Goods Warehouse (Kathmandu)', 'Balaju Industrial Area, KTM', '30,000 Cartons', 'Dipen Khadka', '+977-9851022222', 'Active', new Date().toISOString()],
+      ['FG-03', 'Packing Materials Store', 'Biratnagar Main Plant', '20,000 Units', 'Sita Dahal', '+977-9842033333', 'Active', new Date().toISOString()],
+      ['FG-04', 'Quarantine & Spares Depot', 'Biratnagar Plant Sec B', '10,000 Units', 'Bikash Roy', '+977-9842044444', 'Active', new Date().toISOString()]
+    ];
+    whSheet.getRange(2, 1, defaultWarehouses.length, 8).setValues(defaultWarehouses);
+  }
+
+  // Roles
+  var roleSheet = ss.getSheetByName('Roles');
+  if (roleSheet && roleSheet.getLastRow() <= 1) {
+    var defaultRoles = [
+      ['Super Admin', 'Full unrestricted enterprise control across all ERP modules', JSON.stringify(['*']), new Date().toISOString()],
+      ['Procurement Officer', 'Manage Indents, Suppliers, Quotations, POs, LC/TT, Shipments, Tenders', JSON.stringify(['indents', 'suppliers', 'forwarders', 'quotations', 'po', 'lctt', 'shipments', 'tenders', 'reports_proc']), new Date().toISOString()],
+      ['Store Officer', 'Manage Item Master, Inventory Ledger, GRN receipts, Stock adjustments', JSON.stringify(['items', 'inventory', 'grn', 'warehouses', 'reports_inventory']), new Date().toISOString()],
+      ['Production Officer', 'Manage BOM, Production Planning, Material Consumption, Finished Goods', JSON.stringify(['bom', 'production', 'items_read', 'inventory_read', 'reports_prod']), new Date().toISOString()],
+      ['Dispatch Officer', 'Manage Delivery Challans, Customer dispatches, Logistics verification', JSON.stringify(['dispatch', 'inventory_read', 'reports_dispatch']), new Date().toISOString()]
+    ];
+    roleSheet.getRange(2, 1, defaultRoles.length, 4).setValues(defaultRoles);
+  }
+
+  // Initial Item Master
+  var itemSheet = ss.getSheetByName('Items');
+  if (itemSheet && itemSheet.getLastRow() <= 1) {
+    var sampleItems = [
+      ['RM-101', 'Paracetamol IP/BP Powder', 'Raw Materials', 'KG', '1 Drum = 25 KG', '29222990', 200, 480.00, 1500, 720000, 'WH-01', new Date().toISOString()],
+      ['RM-102', 'Microcrystalline Cellulose (Avicel PH102)', 'Raw Materials', 'KG', '1 Bag = 20 KG', '39129000', 150, 320.00, 80, 25600, 'WH-01', new Date().toISOString()],
+      ['RM-103', 'Povidone K30 (PVP K-30)', 'Raw Materials', 'KG', '1 Drum = 25 KG', '39059900', 50, 750.00, 40, 30000, 'WH-01', new Date().toISOString()],
+      ['PM-201', 'Printed Blister Foil 0.025mm', 'Packing Materials', 'Roll', '1 Roll = 1000 M', '76071990', 25, 2400.00, 60, 144000, 'WH-03', new Date().toISOString()],
+      ['PM-202', 'Mono Carton 10x10 Tablets', 'Packing Materials', 'Pcs', '1 Box = 1000 Pcs', '48191000', 5000, 3.50, 12000, 42000, 'WH-03', new Date().toISOString()],
+      ['PM-203', 'Outer Master Corrugated Shipper', 'Packing Materials', 'Pcs', '1 Bundle = 50 Pcs', '48192000', 200, 65.00, 85, 5525, 'WH-03', new Date().toISOString()],
+      ['SFG-301', 'Paracetamol 500mg Granules (Uncompressed)', 'Semi-finished goods', 'KG', '1 Batch = 250 KG', '30039011', 100, 520.00, 350, 182000, 'WH-01', new Date().toISOString()],
+      ['FG-401', 'ParaCure 500mg Tablets (Box of 100)', 'Finished goods', 'Box', '1 Carton = 60 Boxes', '30049060', 500, 185.00, 4200, 777000, 'WH-02', new Date().toISOString()],
+      ['FG-402', 'CoughNil Junior Syrup 100ml', 'Finished goods', 'Bottle', '1 Carton = 48 Bottles', '30049090', 300, 95.00, 240, 22800, 'WH-02', new Date().toISOString()],
+      ['SP-501', 'Punch & Die Set B-Tooling (12mm Concave)', 'store & spares', 'Set', '1 Set = 16 Stn', '84779000', 2, 85000.00, 4, 340000, 'WH-04', new Date().toISOString()],
+      ['WS-601', 'Coating Scrap & Powder Dust', 'wastage', 'KG', 'N/A', '30040000', 0, 0.00, 45, 0, 'WH-04', new Date().toISOString()]
+    ];
+    itemSheet.getRange(2, 1, sampleItems.length, 12).setValues(sampleItems);
+  }
+
+  // Initial Suppliers
+  var supSheet = ss.getSheetByName('Suppliers');
+  if (supSheet && supSheet.getLastRow() <= 1) {
+    var sampleSuppliers = [
+      ['SUP-001', 'Gujarat Organic Chemical Synthetics Ltd.', 'PAN-9920192', 'GSTIN24AAACG1234F1Z5', 'Mr. Amit Patel', '+91-9825012345', 'sales@gujaratchem.in', 'India', 'GIDC Ankleshwar, Gujarat, India', '30 Days TT', 'INR', 21, 4.8, new Date().toISOString()],
+      ['SUP-002', 'Zhejiang Pharma Corp & Active Ingredients', 'PAN-FOREIGN-01', 'CN-913301007', 'Ms. Chen Wei', '+86-571-88991122', 'export@zhejiangpharma.cn', 'China', 'Binjiang High-Tech Park, Hangzhou, China', 'LC at Sight 60 Days', 'USD', 45, 4.9, new Date().toISOString()],
+      ['SUP-003', 'Himalayan Packaging & Foil Industries', 'PAN-301298451', 'N/A', 'Dipesh Shrestha', '+977-9851088776', 'info@himalayanpackaging.com.np', 'Nepal', 'Patandhoka Industrial Area, Lalitpur, Nepal', '15 Days Credit', 'NPR', 7, 4.5, new Date().toISOString()],
+      ['SUP-004', 'Euro-Med Health & Chemical GmbH', 'DE-812345678', 'DE812345678', 'Dr. Klaus Becker', '+49-69-1234567', 'klaus.becker@euromed-pharma.de', 'Germany', 'Industriepark Hoechst, Frankfurt, Germany', '100% Advance TT', 'EUR', 35, 4.7, new Date().toISOString()]
+    ];
+    supSheet.getRange(2, 1, sampleSuppliers.length, 14).setValues(sampleSuppliers);
+  }
+
+  // Initial Freight Forwarders
+  var ffSheet = ss.getSheetByName('FreightForwarder');
+  if (ffSheet && ffSheet.getLastRow() <= 1) {
+    var sampleFF = [
+      ['FF-01', 'Trans-Himalayan Logistics & Freight Pvt. Ltd.', 'Birgunj Dry Port Rd & Thamel, KTM', 'Sanjay Gupta', '+977-9855012345', 'sanjay@transhimalaya.com.np', 4.8, 'Expert in Kolkata Port to Birgunj Dry Port transit', new Date().toISOString()],
+      ['FF-02', 'Everest Express Ocean & Air Cargo', 'Sinamangal Cargo Complex, Kathmandu', 'Pooja Thapa', '+977-9801044556', 'cargo@everestexpress.com', 4.6, 'Reliable for air shipments from Europe & China', new Date().toISOString()]
+    ];
+    ffSheet.getRange(2, 1, sampleFF.length, 9).setValues(sampleFF);
+  }
+
+
+}
+
+/**
+ * Audit Logging Helper
+ */
+function logAudit(action, module, recordId, details, userEmail) {
+  try {
+    var ss = getDatabase();
+    var sheet = ss.getSheetByName('AuditLog');
+    if (!sheet) return;
+    var email = userEmail || Session.getActiveUser().getEmail() || 'system';
+    sheet.appendRow([
+      'LOG-' + Utilities.getUuid().substring(0, 8).toUpperCase(),
+      new Date().toISOString(),
+      email,
+      action,
+      module,
+      recordId || '',
+      typeof details === 'object' ? JSON.stringify(details) : String(details)
+    ]);
+  } catch (e) {
+    Logger.log('Audit log error: ' + e.toString());
+  }
+}
+
+/**
+ * Bootstrap Application Data: Returns user profile, permissions, active settings & exchange rates
+ */
+function getBootstrap() {
+  var ss = getDatabase();
+  var userEmail = Session.getActiveUser().getEmail() || 'dipen.khadka@birathealthcare.com';
+
+  // Load Settings
+  var settings = {};
+  var setSheet = ss.getSheetByName('Settings');
+  if (setSheet && setSheet.getLastRow() > 1) {
+    var setVals = setSheet.getRange(2, 1, setSheet.getLastRow() - 1, 2).getValues();
+    for (var i = 0; i < setVals.length; i++) {
+      settings[setVals[i][0]] = setVals[i][1];
+    }
+  }
+
+  // Exchange rates from settings with fallback
+  var exchangeRates = {
+    USD: parseFloat(settings['EXCHANGE_RATE_USD']) || DEFAULT_EXCHANGE_RATES.USD,
+    INR: parseFloat(settings['EXCHANGE_RATE_INR']) || DEFAULT_EXCHANGE_RATES.INR,
+    EUR: parseFloat(settings['EXCHANGE_RATE_EUR']) || DEFAULT_EXCHANGE_RATES.EUR,
+    GBP: parseFloat(settings['EXCHANGE_RATE_GBP']) || DEFAULT_EXCHANGE_RATES.GBP,
+    CNY: parseFloat(settings['EXCHANGE_RATE_CNY']) || DEFAULT_EXCHANGE_RATES.CNY,
+    NPR: 1.00
+  };
+
+  // Determine user role
+  var userRole = 'Super Admin'; // Default for developer/owner
+  var usersSheet = ss.getSheetByName('Users');
+  if (usersSheet && usersSheet.getLastRow() > 1) {
+    var uData = usersSheet.getRange(2, 1, usersSheet.getLastRow() - 1, 4).getValues();
+    for (var u = 0; u < uData.length; u++) {
+      if (String(uData[u][1]).toLowerCase() === userEmail.toLowerCase()) {
+        userRole = uData[u][3] || userRole;
+        break;
+      }
+    }
+  }
+
+  return {
+    success: true,
+    userEmail: userEmail,
+    role: userRole,
+    appName: 'Khadka System',
+    companyName: settings['COMPANY_NAME'] || 'Birat Healthcare Industries Pvt. Ltd.',
+    exchangeRates: exchangeRates,
+    settings: settings,
+    timestamp: new Date().toISOString()
+  };
+}
+
+/**
+ * Convert any currency to NPR
+ */
+function convertToNPR(amount, currency, rates) {
+  var amt = parseFloat(amount) || 0;
+  var curr = (currency || 'NPR').toUpperCase().trim();
+  var rate = (rates && rates[curr]) ? rates[curr] : (DEFAULT_EXCHANGE_RATES[curr] || 1.00);
+  return amt * rate;
+}
+
+/**
+ * High-Performance Dashboard Aggregator
+ * Generates all KPI cards, side-by-side comparisons, filtered charts & alert lists
+ */
+function getDashboard(filterOpts) {
+  var ss = getDatabase();
+  var bootstrap = getBootstrap();
+  var rates = bootstrap.exchangeRates;
+  var filters = filterOpts || { period: 'yearly', dateFrom: '', dateTo: '' };
+
+  // 1. Purchase Orders KPI & Totals
+  var poSheet = ss.getSheetByName('PurchaseOrders');
+  var totalPOValueNPR = 0;
+  var pendingPOCount = 0;
+  var pendingPOValueNPR = 0;
+  var recentPOs = [];
+
+  if (poSheet && poSheet.getLastRow() > 1) {
+    var poRows = getSheetObjects(poSheet);
+    poRows.forEach(function (po) {
+      var valNPR = parseFloat(po.TotalValueNPR) || convertToNPR(po.TotalValue, po.Currency, rates);
+      totalPOValueNPR += valNPR;
+
+      var status = (po.Status || '').toLowerCase();
+      var recvStatus = (po.ReceivedStatus || '').toLowerCase();
+      if (status !== 'completed' && status !== 'cancelled' && recvStatus !== 'fully received') {
+        pendingPOCount++;
+        pendingPOValueNPR += valNPR;
+      }
+
+      recentPOs.push({
+        poNo: po.PONo,
+        supplierName: po.SupplierName,
+        date: po.OrderDate,
+        amount: po.TotalValue,
+        currency: po.Currency,
+        amountNPR: valNPR,
+        status: po.Status,
+        receivedStatus: po.ReceivedStatus
+      });
+    });
+  }
+
+  // 2. Outstanding Payments (Supplier side vs Customer/Tender side)
+  var lcttSheet = ss.getSheetByName('LCTTPayments');
+  var supplierOutstandingNPR = 0;
+  var supplierPaidNPR = 0;
+
+  if (lcttSheet && lcttSheet.getLastRow() > 1) {
+    var lcttRows = getSheetObjects(lcttSheet);
+    lcttRows.forEach(function (pay) {
+      var amtNPR = parseFloat(pay.AmountNPR) || convertToNPR(pay.Amount, pay.Currency, rates);
+      var status = (pay.Status || '').toLowerCase();
+      if (status === 'pending' || status === 'in progress') {
+        supplierOutstandingNPR += amtNPR;
+      } else {
+        supplierPaidNPR += amtNPR;
+      }
+    });
+  }
+
+  // Customer outstanding (From Tender / Dispatch balances)
+  var tenderSheet = ss.getSheetByName('TenderTracking');
+  var customerOutstandingNPR = 0;
+  if (tenderSheet && tenderSheet.getLastRow() > 1) {
+    var tRows = getSheetObjects(tenderSheet);
+    tRows.forEach(function (t) {
+      var amt = parseFloat(t.Amount) || 0;
+      var dStatus = (t.DispatchStatus || '').toLowerCase();
+      // If delivered but pending final settlement
+      if (dStatus === 'dispatched' || dStatus === 'partial') {
+        customerOutstandingNPR += amt;
+      }
+    });
+  }
+
+  // 3. Import Shipments in Transit (Side-by-side: India vs Third Country)
+  var shipSheet = ss.getSheetByName('Shipments');
+  var shipmentsTransitIndia = 0;
+  var shipmentsTransitThirdCountry = 0;
+  var totalShipmentsInTransit = 0;
+
+  if (shipSheet && shipSheet.getLastRow() > 1) {
+    var shipRows = getSheetObjects(shipSheet);
+    shipRows.forEach(function (s) {
+      var status = (s.ShipmentStatus || '').toLowerCase();
+      if (status.indexOf('transit') !== -1 || status.indexOf('port') !== -1 || status === 'customs pending' || status === 'in progress') {
+        totalShipmentsInTransit++;
+        var origin = (s.OriginType || '').toLowerCase();
+        var country = (s.OriginCountry || '').toLowerCase();
+        if (origin === 'india' || country.indexOf('india') !== -1) {
+          shipmentsTransitIndia++;
+        } else {
+          shipmentsTransitThirdCountry++;
+        }
+      }
+    });
+  }
+
+  // 4. Inventory Value & Low Stock Alerts
+  var itemSheet = ss.getSheetByName('Items');
+  var totalInventoryValueNPR = 0;
+  var lowStockItems = [];
+  var productionByCategory = {};
+
+  if (itemSheet && itemSheet.getLastRow() > 1) {
+    var itemRows = getSheetObjects(itemSheet);
+    itemRows.forEach(function (item) {
+      var stock = parseFloat(item.CurrentStock) || 0;
+      var reorder = parseFloat(item.ReorderLevel) || 0;
+      var rate = parseFloat(item.StandardCostNPR) || 0;
+      var val = stock * rate;
+      totalInventoryValueNPR += val;
+
+      if (stock <= reorder) {
+        lowStockItems.push({
+          itemCode: item.ItemCode,
+          itemName: item.ItemName,
+          category: item.Category,
+          currentStock: stock,
+          reorderLevel: reorder,
+          unit: item.Unit,
+          warehouse: item.Warehouse,
+          shortage: Math.max(0, reorder - stock)
+        });
+      }
+
+      var cat = item.Category || 'Other';
+      if (!productionByCategory[cat]) productionByCategory[cat] = 0;
+      productionByCategory[cat] += stock;
+    });
+  }
+
+  // 5. Production Quantity (Pcs/Units)
+  var prodSheet = ss.getSheetByName('Production');
+  var totalProductionQty = 0;
+  var recentProductions = [];
+
+  if (prodSheet && prodSheet.getLastRow() > 1) {
+    var prodRows = getSheetObjects(prodSheet);
+    prodRows.forEach(function (pr) {
+      var qty = parseFloat(pr.ProducedQty) || 0;
+      totalProductionQty += qty;
+      recentProductions.push({
+        prodOrderId: pr.ProdOrderId,
+        date: pr.ProdDate,
+        itemName: pr.OutputItemName,
+        qty: qty,
+        efficiency: pr.EfficiencyPct,
+        batchNo: pr.BatchNo
+      });
+    });
+  }
+
+  // 6. Dispatch Quantity (Pcs/Units)
+  var dispatchSheet = ss.getSheetByName('Dispatch');
+  var totalDispatchQty = 0;
+  var recentDispatches = [];
+
+  if (dispatchSheet && dispatchSheet.getLastRow() > 1) {
+    var dispRows = getSheetObjects(dispatchSheet);
+    dispRows.forEach(function (dp) {
+      var qty = parseFloat(dp.TotalQty) || 0;
+      totalDispatchQty += qty;
+      recentDispatches.push({
+        dispatchNo: dp.DispatchNo,
+        date: dp.DispatchDate,
+        customerName: dp.CustomerName,
+        qty: qty,
+        challanNo: dp.DeliveryChallanNo,
+        status: dp.Status
+      });
+    });
+  }
+
+  // 7. Recent Transactions (Audit Log)
+  var auditSheet = ss.getSheetByName('AuditLog');
+  var recentTransactions = [];
+  if (auditSheet && auditSheet.getLastRow() > 1) {
+    var aRows = getSheetObjects(auditSheet);
+    // Sort descending by timestamp
+    aRows.sort(function (a, b) {
+      return new Date(b.Timestamp).getTime() - new Date(a.Timestamp).getTime();
+    });
+    recentTransactions = aRows.slice(0, 15);
+  }
+
+  // 8. Tenders summary
+  var tendersList = [];
+  if (tenderSheet && tenderSheet.getLastRow() > 1) {
+    var tSummary = getSheetObjects(tenderSheet);
+    tendersList = tSummary.slice(-10);
+  }
+
+  return {
+    success: true,
+    kpis: {
+      totalPOValueNPR: totalPOValueNPR,
+      pendingPOCount: pendingPOCount,
+      pendingPOValueNPR: pendingPOValueNPR,
+      outstandingPayments: {
+        supplierOutstandingNPR: supplierOutstandingNPR,
+        supplierPaidNPR: supplierPaidNPR,
+        customerOutstandingNPR: customerOutstandingNPR,
+        period: filters.period || 'yearly'
+      },
+      shipmentsInTransit: {
+        total: totalShipmentsInTransit,
+        india: shipmentsTransitIndia,
+        thirdCountry: shipmentsTransitThirdCountry
+      },
+      totalInventoryValueNPR: totalInventoryValueNPR,
+      lowStockCount: lowStockItems.length,
+      totalProductionQty: totalProductionQty,
+      totalDispatchQty: totalDispatchQty
+    },
+    lists: {
+      lowStockItems: lowStockItems,
+      recentPOs: recentPOs.slice(-10).reverse(),
+      recentProductions: recentProductions.slice(-10).reverse(),
+      recentDispatches: recentDispatches.slice(-10).reverse(),
+      recentTransactions: recentTransactions,
+      tendersList: tendersList
+    },
+    charts: {
+      productionByCategory: productionByCategory,
+      procurementTrend: generateProcurementTrend(ss, rates),
+      dispatchTrend: generateDispatchTrend(ss)
+    },
+    exchangeRates: rates,
+    timestamp: new Date().toISOString()
+  };
+}
+
+/**
+ * Trend analysis helper: Procurement by month
+ */
+function generateProcurementTrend(ss, rates) {
+  var poSheet = ss.getSheetByName('PurchaseOrders');
+  var monthlyMap = {};
+  var months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  var currentYear = new Date().getFullYear();
+
+  months.forEach(function (m) {
+    monthlyMap[m + ' ' + currentYear] = 0;
+  });
+
+  if (poSheet && poSheet.getLastRow() > 1) {
+    var rows = getSheetObjects(poSheet);
+    rows.forEach(function (r) {
+      if (r.OrderDate) {
+        var d = new Date(r.OrderDate);
+        if (!isNaN(d.getTime())) {
+          var key = months[d.getMonth()] + ' ' + d.getFullYear();
+          var val = parseFloat(r.TotalValueNPR) || convertToNPR(r.TotalValue, r.Currency, rates);
+          if (monthlyMap[key] !== undefined) {
+            monthlyMap[key] += val;
+          } else {
+            monthlyMap[key] = val;
+          }
+        }
+      }
+    });
+  }
+
+  var labels = Object.keys(monthlyMap);
+  var data = labels.map(function (k) { return Math.round(monthlyMap[k]); });
+  return { labels: labels, data: data };
+}
+
+/**
+ * Trend analysis helper: Dispatch quantity by month
+ */
+function generateDispatchTrend(ss) {
+  var dSheet = ss.getSheetByName('Dispatch');
+  var monthlyMap = {};
+  var months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  var currentYear = new Date().getFullYear();
+
+  months.forEach(function (m) {
+    monthlyMap[m + ' ' + currentYear] = 0;
+  });
+
+  if (dSheet && dSheet.getLastRow() > 1) {
+    var rows = getSheetObjects(dSheet);
+    rows.forEach(function (r) {
+      if (r.DispatchDate) {
+        var d = new Date(r.DispatchDate);
+        if (!isNaN(d.getTime())) {
+          var key = months[d.getMonth()] + ' ' + d.getFullYear();
+          var qty = parseFloat(r.TotalQty) || 0;
+          if (monthlyMap[key] !== undefined) {
+            monthlyMap[key] += qty;
+          } else {
+            monthlyMap[key] = qty;
+          }
+        }
+      }
+    });
+  }
+
+  var labels = Object.keys(monthlyMap);
+  var data = labels.map(function (k) { return Math.round(monthlyMap[k]); });
+  return { labels: labels, data: data };
+}
+
+/**
+ * Generic Read Records with Filter Criteria
+ */
+function getRecords(sheetName, filterCriteria) {
+  var ss = getDatabase();
+  var sheet = ss.getSheetByName(sheetName);
+  if (!sheet) {
+    throw new Error('Sheet not found: ' + sheetName);
+  }
+  if (sheet.getLastRow() <= 1) {
+    return [];
+  }
+
+  var records = getSheetObjects(sheet);
+
+  if (filterCriteria && typeof filterCriteria === 'object') {
+    return records.filter(function (rec) {
+      for (var key in filterCriteria) {
+        if (filterCriteria[key] !== undefined && filterCriteria[key] !== '' && filterCriteria[key] !== null) {
+          if (String(rec[key]).toLowerCase() !== String(filterCriteria[key]).toLowerCase()) {
+            return false;
+          }
+        }
+      }
+      return true;
+    });
+  }
+  return records;
+}
+
+/**
+ * Universal Lookups Provider for Dropdowns & Autocomplete
+ */
+function getLookups() {
+  var ss = getDatabase();
+  return {
+    items: getSheetObjects(ss.getSheetByName('Items')),
+    suppliers: getSheetObjects(ss.getSheetByName('Suppliers')),
+    forwarders: getSheetObjects(ss.getSheetByName('FreightForwarder')),
+    warehouses: getSheetObjects(ss.getSheetByName('Warehouses')),
+    boms: getSheetObjects(ss.getSheetByName('BOM')),
+    approvedQuotations: getRecords('Quotations', { MDApproval: 'Approved' }),
+    activePOs: getRecords('PurchaseOrders', { Status: 'Approved' }),
+    tenders: getSheetObjects(ss.getSheetByName('Tenders')),
+    roles: getSheetObjects(ss.getSheetByName('Roles'))
+  };
+}
+
+/**
+ * Helper: Read all sheet rows into an array of JavaScript Objects using Header row as keys
+ */
+function getSheetObjects(sheet) {
+  if (!sheet || sheet.getLastRow() <= 1) return [];
+  var lastRow = sheet.getLastRow();
+  var lastCol = sheet.getLastColumn();
+  var data = sheet.getRange(1, 1, lastRow, lastCol).getValues();
+  var headers = data[0];
+  var results = [];
+
+  for (var r = 1; r < data.length; r++) {
+    var obj = { _row: r + 1 };
+    var hasContent = false;
+    for (var c = 0; c < headers.length; c++) {
+      var header = headers[c];
+      var cellVal = data[r][c];
+      if (cellVal instanceof Date) {
+        cellVal = Utilities.formatDate(cellVal, Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss');
+      }
+      obj[header] = cellVal;
+      if (cellVal !== '' && cellVal !== null && cellVal !== undefined) {
+        hasContent = true;
+      }
+    }
+    if (hasContent) {
+      results.push(obj);
+    }
+  }
+  return results;
+}
+
+/**
+ * Universal Save Record (Create / Update)
+ * Enforces LockService, Timestamping, ID generation and Audit Logging
+ */
+function saveRecord(sheetName, recordData, userEmail) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+
+  try {
+    var ss = getDatabase();
+    var sheet = ss.getSheetByName(sheetName);
+    if (!sheet) throw new Error('Sheet not found: ' + sheetName);
+
+    var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+    var primaryKey = headers[0];
+    var idValue = recordData[primaryKey];
+    var isNew = !idValue;
+
+    if (isNew) {
+      idValue = generateUniqueId(sheetName);
+      recordData[primaryKey] = idValue;
+    }
+
+    // Auto calculate NPR fields if currency provided
+    var bootstrap = getBootstrap();
+    if (recordData.Currency && recordData.TotalValue && !recordData.TotalValueNPR) {
+      recordData.TotalValueNPR = convertToNPR(recordData.TotalValue, recordData.Currency, bootstrap.exchangeRates);
+    }
+    if (recordData.Currency && recordData.TotalAmount && !recordData.TotalAmountNPR) {
+      recordData.TotalAmountNPR = convertToNPR(recordData.TotalAmount, recordData.Currency, bootstrap.exchangeRates);
+    }
+    if (recordData.Currency && recordData.Amount && !recordData.AmountNPR) {
+      recordData.AmountNPR = convertToNPR(recordData.Amount, recordData.Currency, bootstrap.exchangeRates);
+    }
+
+    recordData['Timestamp'] = new Date().toISOString();
+
+    var existingRow = -1;
+    if (!isNew && sheet.getLastRow() > 1) {
+      var idList = sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getValues();
+      for (var i = 0; i < idList.length; i++) {
+        if (String(idList[i][0]) === String(idValue)) {
+          existingRow = i + 2;
+          break;
+        }
+      }
+    }
+
+    var rowValues = [];
+    for (var h = 0; h < headers.length; h++) {
+      var colName = headers[h];
+      var val = recordData[colName];
+      if (typeof val === 'object' && val !== null) {
+        val = JSON.stringify(val);
+      }
+      rowValues.push(val !== undefined ? val : '');
+    }
+
+    if (existingRow > 0) {
+      sheet.getRange(existingRow, 1, 1, headers.length).setValues([rowValues]);
+      logAudit('UPDATE_RECORD', sheetName, idValue, recordData, userEmail);
+    } else {
+      sheet.appendRow(rowValues);
+      logAudit('CREATE_RECORD', sheetName, idValue, recordData, userEmail);
+    }
+
+    // Trigger workflow side-effects
+    handlePostSaveWorkflow(sheetName, recordData, userEmail);
+
+    return {
+      success: true,
+      id: idValue,
+      message: 'Record ' + (existingRow > 0 ? 'updated' : 'created') + ' successfully in ' + sheetName,
+      data: recordData
+    };
+  } catch (err) {
+    throw new Error('saveRecord error in ' + sheetName + ': ' + err.message);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * ID generator prefix rules
+ */
+function generateUniqueId(sheetName) {
+  var prefixMap = {
+    'Indents': 'IND',
+    'Suppliers': 'SUP',
+    'FreightForwarder': 'FF',
+    'Quotations': 'QT',
+    'PurchaseOrders': 'PO',
+    'LCTTPayments': 'PAY',
+    'Shipments': 'SHP',
+    'Tenders': 'TND',
+    'TenderTracking': 'TRK',
+    'Items': 'ITM',
+    'Inventory': 'TX',
+    'Warehouses': 'WH',
+    'BOM': 'BOM',
+    'Production': 'PRD',
+    'Dispatch': 'DSP',
+    'Users': 'USR'
+  };
+  var prefix = prefixMap[sheetName] || 'REC';
+  var ss = getDatabase();
+  var sheet = ss.getSheetByName(sheetName);
+  var nextNum = 1001;
+  if (sheet && sheet.getLastRow() > 1) {
+    nextNum = 1000 + sheet.getLastRow();
+  }
+  return prefix + '-' + nextNum;
+}
+
+/**
+ * Delete Record with Audit Trail
+ */
+function deleteRecord(sheetName, recordId, userEmail) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+
+  try {
+    var ss = getDatabase();
+    var sheet = ss.getSheetByName(sheetName);
+    if (!sheet) throw new Error('Sheet not found: ' + sheetName);
+
+    var idList = sheet.getRange(2, 1, Math.max(1, sheet.getLastRow() - 1), 1).getValues();
+    var targetRow = -1;
+    for (var i = 0; i < idList.length; i++) {
+      if (String(idList[i][0]) === String(recordId)) {
+        targetRow = i + 2;
+        break;
+      }
+    }
+
+    if (targetRow === -1) {
+      throw new Error('Record with ID ' + recordId + ' not found in ' + sheetName);
+    }
+
+    sheet.deleteRow(targetRow);
+    logAudit('DELETE_RECORD', sheetName, recordId, 'Row ' + targetRow + ' deleted', userEmail);
+
+    return {
+      success: true,
+      message: 'Record ' + recordId + ' successfully deleted from ' + sheetName
+    };
+  } catch (err) {
+    throw new Error('deleteRecord error: ' + err.message);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * Handle Workflow Actions upon saving specific records
+ */
+function handlePostSaveWorkflow(sheetName, recordData, userEmail) {
+  // If Tender won, automatically link or create TenderTracking record
+  if (sheetName === 'Tenders' && String(recordData.Result).toLowerCase() === 'win') {
+    createOrUpdateTenderTracking(recordData, userEmail);
+  }
+}
+
+/**
+ * Automatically create TenderTracking entry when a Tender is won
+ */
+function createOrUpdateTenderTracking(tenderData, userEmail) {
+  var ss = getDatabase();
+  var trkSheet = ss.getSheetByName('TenderTracking');
+  if (!trkSheet) return;
+
+  var existing = getRecords('TenderTracking', { TenderNo: tenderData.TenderNo });
+  if (existing.length === 0) {
+    var trkRecord = {
+      TrackingId: 'TRK-' + tenderData.TenderNo,
+      TenderNo: tenderData.TenderNo,
+      TenderName: tenderData.TenderName,
+      Address: tenderData.Address,
+      ContactInfo: tenderData.ContactInfo,
+      LastSubmissionDate: tenderData.SubmissionDeadline,
+      ItemName: tenderData.ItemName,
+      Unit: tenderData.Unit,
+      Quantity: tenderData.Quantity,
+      RateIncVat: tenderData.EstimatedRate,
+      Amount: (parseFloat(tenderData.Quantity) || 0) * (parseFloat(tenderData.EstimatedRate) || 0),
+      MuchulkaStatus: 'Pending',
+      MuchulkaDate: '',
+      LOIStatus: 'Pending',
+      LOIDate: '',
+      LOAStatus: 'Pending',
+      LOADate: '',
+      PGStatus: 'Pending',
+      PGDate: '',
+      SampleStatus: 'Pending',
+      SampleDate: '',
+      ProductionStatus: 'Not Started',
+      DispatchStatus: 'Not Dispatched',
+      DispatchDate: '',
+      Remarks: 'Auto-created from won tender ' + tenderData.TenderNo,
+      Timestamp: new Date().toISOString()
+    };
+    saveRecord('TenderTracking', trkRecord, userEmail);
+  }
+}
+
+/**
+ * Approval Workflow Engine (MD Approval for Quotation/PI, PO Approvals, Indents)
+ */
+function setApproval(module, id, status, remarks, userEmail) {
+  var ss = getDatabase();
+  var email = userEmail || Session.getActiveUser().getEmail();
+
+  if (module === 'Quotations') {
+    var quotes = getRecords('Quotations', { QuotationNo: id });
+    if (quotes.length === 0) throw new Error('Quotation ' + id + ' not found');
+    var quote = quotes[0];
+    quote.MDApproval = status; // 'Approved' or 'Rejected'
+    quote.MDApprovalDate = new Date().toISOString();
+    quote.MDNotes = remarks || '';
+    quote.Status = status === 'Approved' ? 'Ready for PO' : 'Rejected';
+    saveRecord('Quotations', quote, email);
+    logAudit('APPROVAL_ACTION', 'Quotations', id, { status: status, remarks: remarks }, email);
+    return { success: true, message: 'Quotation ' + id + ' MD approval set to ' + status };
+  }
+
+  if (module === 'PurchaseOrders') {
+    var pos = getRecords('PurchaseOrders', { PONo: id });
+    if (pos.length === 0) throw new Error('Purchase Order ' + id + ' not found');
+    var po = pos[0];
+    po.ApprovalStatus = status; // 'Approved' or 'Rejected'
+    po.Status = status === 'Approved' ? 'Open' : 'Rejected';
+    saveRecord('PurchaseOrders', po, email);
+    logAudit('APPROVAL_ACTION', 'PurchaseOrders', id, { status: status, remarks: remarks }, email);
+    return { success: true, message: 'Purchase Order ' + id + ' approval set to ' + status };
+  }
+
+  if (module === 'Indents') {
+    var indents = getRecords('Indents', { IndentNo: id });
+    if (indents.length === 0) throw new Error('Indent ' + id + ' not found');
+    var ind = indents[0];
+    ind.Status = status;
+    ind.ApprovedBy = email;
+    ind.ApprovalDate = new Date().toISOString();
+    ind.Remarks = remarks || ind.Remarks;
+    saveRecord('Indents', ind, email);
+    logAudit('APPROVAL_ACTION', 'Indents', id, { status: status, remarks: remarks }, email);
+    return { success: true, message: 'Indent ' + id + ' status set to ' + status };
+  }
+
+  throw new Error('Unsupported approval module: ' + module);
+}
+
+/**
+ * GOODS RECEIPT NOTE (GRN)
+ * Generates GRN from approved PO, updates inventory, prevents over-receipt
+ */
+function receivePurchaseOrder(grnData) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+
+  try {
+    var poNo = grnData.poNo;
+    var pos = getRecords('PurchaseOrders', { PONo: poNo });
+    if (pos.length === 0) throw new Error('PO ' + poNo + ' not found');
+    var po = pos[0];
+
+    if (po.ApprovalStatus !== 'Approved') {
+      throw new Error('Cannot receive against unapproved PO ' + poNo);
+    }
+
+    var items = [];
+    if (typeof grnData.items === 'string') {
+      items = JSON.parse(grnData.items);
+    } else {
+      items = grnData.items || [];
+    }
+
+    if (!items || items.length === 0) {
+      throw new Error('No items specified for GRN receipt');
+    }
+
+    var ss = getDatabase();
+    var invSheet = ss.getSheetByName('Inventory');
+    var itemSheet = ss.getSheetByName('Items');
+    var wh = grnData.warehouse || 'WH-01';
+    var userEmail = grnData.userEmail || Session.getActiveUser().getEmail();
+    var grnNumber = 'GRN-' + Utilities.getUuid().substring(0, 6).toUpperCase();
+
+    var totalQtyReceivedInThisGRN = 0;
+
+    items.forEach(function (itm) {
+      var itemCode = itm.itemCode;
+      var qty = parseFloat(itm.receivedQty) || 0;
+      if (qty <= 0) return;
+
+      totalQtyReceivedInThisGRN += qty;
+
+      // 1. Find or verify item in item master
+      var currentStock = 0;
+      var currentValNPR = 0;
+      var itemRowIndex = -1;
+      var itemName = itm.itemName || '';
+      var category = itm.category || 'Raw Materials';
+      var stdCost = parseFloat(itm.unitCost) || 0;
+
+      if (itemSheet && itemSheet.getLastRow() > 1) {
+        var allItems = itemSheet.getRange(2, 1, itemSheet.getLastRow() - 1, 10).getValues();
+        for (var i = 0; i < allItems.length; i++) {
+          if (String(allItems[i][0]).toUpperCase() === itemCode.toUpperCase()) {
+            itemRowIndex = i + 2;
+            itemName = allItems[i][1];
+            category = allItems[i][2];
+            currentStock = parseFloat(allItems[i][8]) || 0;
+            currentValNPR = parseFloat(allItems[i][9]) || 0;
+            stdCost = parseFloat(allItems[i][7]) || stdCost;
+            break;
+          }
+        }
+      }
+
+      var newStock = currentStock + qty;
+      var txValNPR = qty * stdCost;
+      var newTotalValNPR = currentValNPR + txValNPR;
+
+      // 2. Append Inventory Ledger entry
+      var txId = 'TX-' + Utilities.getUuid().substring(0, 8).toUpperCase();
+      invSheet.appendRow([
+        txId,
+        new Date().toISOString(),
+        itemCode,
+        itemName,
+        category,
+        'GRN_RECEIPT',
+        poNo + ' / ' + grnNumber + ' (Inv: ' + (grnData.invoiceNo || '') + ')',
+        wh,
+        qty,
+        0,
+        newStock,
+        stdCost,
+        txValNPR,
+        itm.batchNo || grnData.batchNo || 'BATCH-' + Utilities.formatDate(new Date(), 'GMT', 'yyyyMMdd'),
+        itm.storageLocation || grnData.storageLocation || 'Bay A',
+        grnData.mfgDate || '',
+        grnData.expDate || '',
+        userEmail,
+        new Date().toISOString()
+      ]);
+
+      // 3. Update stock in Item Master
+      if (itemRowIndex > 0) {
+        itemSheet.getRange(itemRowIndex, 9).setValue(newStock);
+        itemSheet.getRange(itemRowIndex, 10).setValue(newTotalValNPR);
+      }
+    });
+
+    // 4. Update PO received status
+    var currentReceived = parseFloat(po.ReceivedQty) || 0;
+    var updatedReceived = currentReceived + totalQtyReceivedInThisGRN;
+    po.ReceivedQty = updatedReceived;
+    po.PendingQty = Math.max(0, (parseFloat(po.TotalValue) || 0) - updatedReceived);
+    po.ReceivedStatus = po.PendingQty === 0 ? 'Fully Received' : 'Partially Received';
+    if (po.ReceivedStatus === 'Fully Received') {
+      po.Status = 'Completed';
+    }
+    saveRecord('PurchaseOrders', po, userEmail);
+
+    logAudit('GOODS_RECEIPT', 'PurchaseOrders', poNo, {
+      grnNumber: grnNumber,
+      invoiceNo: grnData.invoiceNo,
+      qtyReceived: totalQtyReceivedInThisGRN
+    }, userEmail);
+
+    return {
+      success: true,
+      grnNumber: grnNumber,
+      message: 'GRN ' + grnNumber + ' posted successfully. Inventory updated with ' + totalQtyReceivedInThisGRN + ' units.'
+    };
+  } catch (err) {
+    throw new Error('receivePurchaseOrder failed: ' + err.message);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * PRODUCTION PROCESS & MANAGEMENT
+ * Consumes raw materials based on BOM, increments finished goods, enforces NO negative stock
+ */
+
+/**
+ * DISPATCH MANAGEMENT
+ * Generates Delivery Challan, validates stock, automatically deducts finished goods
+ */
+function postDispatch(dispatchData) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+
+  try {
+    var items = [];
+    if (typeof dispatchData.items === 'string') {
+      items = JSON.parse(dispatchData.items);
+    } else {
+      items = dispatchData.items || [];
+    }
+
+    if (!items || items.length === 0) {
+      throw new Error('No items specified in dispatch order');
+    }
+
+    var ss = getDatabase();
+    var itemSheet = ss.getSheetByName('Items');
+    var invSheet = ss.getSheetByName('Inventory');
+    var warehouse = dispatchData.warehouse || 'WH-02';
+    var userEmail = dispatchData.userEmail || Session.getActiveUser().getEmail();
+
+    // Map items to check stock
+    var allItemsMap = {};
+    if (itemSheet && itemSheet.getLastRow() > 1) {
+      var allData = itemSheet.getRange(2, 1, itemSheet.getLastRow() - 1, 10).getValues();
+      for (var i = 0; i < allData.length; i++) {
+        var code = String(allData[i][0]).toUpperCase();
+        allItemsMap[code] = {
+          rowIndex: i + 2,
+          code: allData[i][0],
+          name: allData[i][1],
+          category: allData[i][2],
+          unit: allData[i][3],
+          cost: parseFloat(allData[i][7]) || 0,
+          stock: parseFloat(allData[i][8]) || 0,
+          value: parseFloat(allData[i][9]) || 0
+        };
+      }
+    }
+
+    // Validate shortages
+    var shortages = [];
+    var itemsToDispatch = [];
+    var totalDispatchQty = 0;
+
+    items.forEach(function (itm) {
+      var code = String(itm.itemCode).toUpperCase();
+      var qty = parseFloat(itm.qty) || 0;
+      if (qty <= 0) return;
+
+      var master = allItemsMap[code];
+      if (!master) {
+        shortages.push('Item ' + itm.itemCode + ' not found in item master');
+        return;
+      }
+
+      if (master.stock < qty) {
+        shortages.push('Cannot dispatch ' + qty + ' ' + master.unit + ' of ' + master.name + '. Available stock: ' + master.stock + ' ' + master.unit);
+      }
+
+      totalDispatchQty += qty;
+      itemsToDispatch.push({
+        code: code,
+        name: master.name,
+        category: master.category,
+        qty: qty,
+        unit: master.unit,
+        unitCost: master.cost,
+        masterMeta: master
+      });
+    });
+
+    if (shortages.length > 0) {
+      throw new Error('NEGATIVE STOCK DISPATCH ERROR:\n' + shortages.join('\n'));
+    }
+
+    var dispatchNo = 'DSP-' + Utilities.getUuid().substring(0, 6).toUpperCase();
+    var challanNo = dispatchData.deliveryChallanNo || 'DC-' + Utilities.formatDate(new Date(), 'GMT', 'yyyyMMdd-HHmm');
+
+    // Deduct stock and log in inventory
+    itemsToDispatch.forEach(function (dItm) {
+      var meta = dItm.masterMeta;
+      var newStock = meta.stock - dItm.qty;
+      var newVal = newStock * dItm.unitCost;
+
+      invSheet.appendRow([
+        'TX-' + Utilities.getUuid().substring(0, 8).toUpperCase(),
+        new Date().toISOString(),
+        dItm.code,
+        dItm.name,
+        dItm.category,
+        'DISPATCH_OUT',
+        dispatchNo + ' / ' + challanNo + ' (' + (dispatchData.customerName || 'Customer') + ')',
+        warehouse,
+        0,
+        dItm.qty,
+        newStock,
+        dItm.unitCost,
+        dItm.qty * dItm.unitCost,
+        dispatchData.batchNo || 'N/A',
+        warehouse,
+        '',
+        '',
+        userEmail,
+        new Date().toISOString()
+      ]);
+
+      itemSheet.getRange(meta.rowIndex, 9).setValue(newStock);
+      itemSheet.getRange(meta.rowIndex, 10).setValue(newVal);
+    });
+
+    var dispatchRecord = {
+      DispatchNo: dispatchNo,
+      DispatchDate: dispatchData.dispatchDate || Utilities.formatDate(new Date(), 'GMT', 'yyyy-MM-dd'),
+      CustomerName: dispatchData.customerName,
+      DestinationAddress: dispatchData.destinationAddress || '',
+      Warehouse: warehouse,
+      VehicleNo: dispatchData.vehicleNo || '',
+      DriverName: dispatchData.driverName || '',
+      DriverContact: dispatchData.driverContact || '',
+      DeliveryChallanNo: challanNo,
+      ItemsJSON: JSON.stringify(itemsToDispatch),
+      TotalQty: totalDispatchQty,
+      Status: 'Dispatched',
+      Remarks: dispatchData.remarks || '',
+      LoggedBy: userEmail,
+      Timestamp: new Date().toISOString()
+    };
+
+    saveRecord('Dispatch', dispatchRecord, userEmail);
+
+    logAudit('POST_DISPATCH', 'Dispatch', dispatchNo, {
+      challanNo: challanNo,
+      customer: dispatchData.customerName,
+      totalQty: totalDispatchQty
+    }, userEmail);
+
+    return {
+      success: true,
+      dispatchNo: dispatchNo,
+      challanNo: challanNo,
+      totalQty: totalDispatchQty,
+      message: 'Dispatch ' + dispatchNo + ' posted successfully. Challan: ' + challanNo + '.'
+    };
+  } catch (err) {
+    throw new Error('postDispatch failed: ' + err.message);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * Report Data Generator for Export (Excel / CSV / Printable PDF)
+ */
+function exportReportData(reportType, filterCriteria) {
+  var ss = getDatabase();
+  var sheetMap = {
+    'purchase_orders': 'PurchaseOrders',
+    'supplier_comparison': 'Quotations',
+    'import_shipments': 'Shipments',
+    'lctt_payments': 'LCTTPayments',
+    'stock_balances': 'Items',
+    'inventory_ledger': 'Inventory',
+    'production_reports': 'Production',
+    'dispatch_reports': 'Dispatch',
+    'tender_tracking': 'TenderTracking'
+  };
+
+  var targetSheet = sheetMap[reportType];
+  if (!targetSheet) throw new Error('Unknown report type: ' + reportType);
+
+  var records = getRecords(targetSheet, filterCriteria);
+  return {
+    success: true,
+    reportType: reportType,
+    generatedAt: new Date().toISOString(),
+    recordCount: records.length,
+    data: records
+  };
+}
+
+
+/**
+ * BOM/Production compatibility adapter.
+ * Uses the original ERP spreadsheet connection and does not create a separate database.
+ */
+function getTargetSpreadsheet() {
+  return getDatabase();
+}
+
+
+function initializeDatabase(lockAlreadyHeld) {
+  var lock = LockService.getScriptLock();
+  if (!lockAlreadyHeld) lock.waitLock(30000);
+
+  try {
+    var ss = getTargetSpreadsheet();
+
+    var schemas = {
+      'BOM_Routines': [
+        'RoutineID', 'RoutineName', 'BOMName', 'ProcessCategory', 'ParentItemCode',
+        'ProductName', 'BaseQuantity', 'Unit', 'LinkedWIPRoutineID', 'EffectiveDate',
+        'Status', 'Revision', 'Description', 'CreatedAt', 'UpdatedAt'
+      ],
+      'BOM_WIP_Issues': [
+        'IssueID', 'RoutineID', 'ItemCode', 'ItemName', 'WidthMM',
+        'GSM', 'LengthMM', 'RatePerKG', 'WeightPerPieceGrams', 'ExpectedAmountNPR', 'Remarks'
+      ],
+      'BOM_WIP_Receipts': [
+        'ReceiptID', 'RoutineID', 'ItemCode', 'ItemName', 'Unit', 'Quantity', 'AmountNPR'
+      ],
+      'BOM_FG_Issues': [
+        'IssueID', 'RoutineID', 'ItemCode', 'ItemName', 'Unit',
+        'Quantity', 'AmountNPR', 'IsWIPReceiptItem', 'LinkedWIPRoutineID', 'Remarks'
+      ],
+      'BOM_FG_Receipts': [
+        'ReceiptID', 'RoutineID', 'ItemCode', 'ItemName', 'Unit', 'Quantity', 'AmountNPR'
+      ],
+      'Item_Master': [
+        'ItemCode', 'ItemName', 'Category', 'Unit', 'WidthMM', 'GSM', 'LengthMM',
+        'RatePerKG', 'RatePerUnit', 'CurrentStock', 'Status', 'Description'
+      ],
+      'Inventory_Valuation': [
+        'ItemCode', 'ItemName', 'Category', 'Unit', 'CurrentStock',
+        'ValuationRatePerKG', 'ValuationRatePerUnit', 'LastPurchaseDate', 'Status'
+      ],
+      'Production_Runs': [
+        'RunID', 'ProductionDate', 'RoutineID', 'RoutineName', 'ProcessCategory',
+        'PlannedQuantity', 'Unit', 'Status', 'TotalIssueVariance', 'TotalReceiptVariance',
+        'RecordedAt', 'RecordedBy', 'Remarks'
+      ],
+      'Production_Run_Issues': [
+        'RunIssueID', 'RunID', 'ItemCode', 'ItemName', 'Unit',
+        'BOMQuantity', 'ActualQuantity', 'VarianceQuantity', 'WeightPerPiece', 'Rate', 'Remarks'
+      ],
+      'Production_Run_Receipts': [
+        'RunReceiptID', 'RunID', 'ItemCode', 'ItemName', 'Unit',
+        'BOMQuantity', 'ActualQuantity', 'VarianceQuantity', 'Remarks'
+      ]
+    };
+
+    var brandColors = {
+      headerBg: '#0f291e',
+      headerFont: '#ffffff'
+    };
+
+    for (var sheetName in schemas) {
+      var sheet = ss.getSheetByName(sheetName);
+      var headers = schemas[sheetName];
+
+      if (!sheet) {
+        sheet = ss.insertSheet(sheetName);
+        sheet.appendRow(headers);
+        var headerRange = sheet.getRange(1, 1, 1, headers.length);
+        headerRange.setBackground(brandColors.headerBg);
+        headerRange.setFontColor(brandColors.headerFont);
+        headerRange.setFontWeight('bold');
+        headerRange.setHorizontalAlignment('center');
+        sheet.setFrozenRows(1);
+      } else {
+        var existingHeaders = sheet.getRange(1, 1, 1, Math.max(sheet.getLastColumn(), 1)).getValues()[0];
+        if (existingHeaders.length === 0 || existingHeaders[0] === '') {
+          sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+          var hr = sheet.getRange(1, 1, 1, headers.length);
+          hr.setBackground(brandColors.headerBg);
+          hr.setFontColor(brandColors.headerFont);
+          hr.setFontWeight('bold');
+          sheet.setFrozenRows(1);
+        }
+      }
+    }
+
+    // Seed Item Master and Inventory Valuation if empty
+    seedItemMaster(ss);
+    seedInventoryValuation(ss);
+
+    // Seed default WIP and FG Routines if empty
+    seedDefaultBOMs(ss);
+
+    return {
+      success: true,
+      message: 'Database sheets successfully initialized and verified.',
+      sheets: Object.keys(schemas)
+    };
+  } catch (err) {
+    throw new Error('Database initialization failed: ' + err.message);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function seedItemMaster(ss) {
+  var sheet = ss.getSheetByName('Item_Master');
+  if (!sheet) return;
+  if (sheet.getLastRow() <= 1) {
+    var sampleItems = [
+      // Raw Materials (width, gsm, length, ratePerKG, ratePerUnit, currentStock, status, description)
+      ['RM-NW-001', 'Non-Woven Hydrophilic Top Sheet', 'Raw Material', 'KG', 70, 40, 230, 310.00, 0, 12500, 'Active', 'Perforated soft spunbond non-woven top sheet'],
+      ['RM-AD-002', 'Airlaid Paper with SAP Core', 'Raw Material', 'KG', 60, 120, 200, 420.00, 0, 9800, 'Active', 'High-density airlaid core with polymer'],
+      ['RM-SAP-003', 'Sumitomo Super Absorbent Polymer (SAP)', 'Raw Material', 'KG', 50, 50, 180, 580.00, 0, 6500, 'Active', 'High retention capacity absorbent granules'],
+      ['RM-PE-004', 'Breathable PE Backsheet Film 18 GSM', 'Raw Material', 'KG', 75, 18, 235, 290.00, 0, 14200, 'Active', 'Micro-porous water barrier breathable backsheet'],
+      ['RM-RP-005', 'Silicone Coated Release Paper Strip', 'Raw Material', 'KG', 45, 42, 190, 240.00, 0, 4800, 'Active', 'Single-sided solventless silicone paper'],
+      ['RM-HMA-006', 'Hot Melt Construction Adhesive', 'Raw Material', 'KG', 0, 0, 0, 480.00, 0, 3500, 'Active', 'Multi-line spray structural glue'],
+      ['RM-HMP-007', 'Positioning Pressure Sensitive Adhesive', 'Raw Material', 'KG', 0, 0, 0, 510.00, 0, 2900, 'Active', 'Undergarment panty positioning glue'],
+      ['RM-WF-008', 'Individual Wrapper Pouch Film', 'Raw Material', 'KG', 95, 22, 260, 330.00, 0, 8400, 'Active', 'Cast polyethylene protective wrapper'],
+      ['RM-TT-009', 'Easy-Tape Tear Tab Strip', 'Raw Material', 'KG', 12, 60, 30, 410.00, 0, 1800, 'Active', 'Adhesive closure tear tab for wrappers'],
+      ['RM-NW-010', 'Spunlace Hydrophobic Side Cuff Non-Woven', 'Raw Material', 'KG', 35, 18, 240, 345.00, 0, 4200, 'Active', 'Anti-leak 3D side barrier cuffs'],
+      ['RM-EL-011', 'Elastic Spandex Yarn (Side Barriers)', 'Raw Material', 'KG', 0, 0, 0, 620.00, 0, 850, 'Active', 'Spandex threads for 3D standing cuffs'],
+      ['RM-BL-012', 'Blue Core ADL (Acquisition Distribution Layer)', 'Raw Material', 'KG', 55, 45, 170, 380.00, 0, 5100, 'Active', 'Blue rapid intake diffusion strip'],
+
+      // Packaging Materials
+      ['PM-PC-010', 'Primary Printed Outer Pouch (Pack of 10)', 'Packaging Material', 'PCS', 0, 0, 0, 0, 4.50, 45000, 'Active', 'Rotogravure printed outer polybag'],
+      ['PM-PC-011', 'Primary Printed Outer Pouch (Pack of 8)', 'Packaging Material', 'PCS', 0, 0, 0, 0, 4.20, 38000, 'Active', 'Ultra-thin wings printed outer bag'],
+      ['PM-PC-012', 'Primary Printed Outer Pouch (Pack of 20)', 'Packaging Material', 'PCS', 0, 0, 0, 0, 6.80, 21000, 'Active', 'Economy value pack outer polybag'],
+      ['PM-MC-011', 'Master Corrugated Shipper Carton (48 Packs)', 'Packaging Material', 'PCS', 0, 0, 0, 0, 45.00, 3200, 'Active', '5-ply heavy duty export carton'],
+      ['PM-MC-012', 'Master Corrugated Shipper Carton (36 Packs)', 'Packaging Material', 'PCS', 0, 0, 0, 0, 42.00, 2800, 'Active', '5-ply shipper carton for night pads'],
+      ['PM-TP-012', 'Bopp Packaging Tape 2-inch (Brown/Clear)', 'Packaging Material', 'ROLL', 0, 0, 0, 0, 85.00, 650, 'Active', 'Carton sealing adhesive tape'],
+      ['PM-ST-013', 'Security Hologram Tamper Evident Seal', 'Packaging Material', 'PCS', 0, 0, 0, 0, 1.20, 80000, 'Active', 'Birat Healthcare branded security seal'],
+
+      // WIP Intermediate Products
+      ['WIP-240-CORE', '240mm Sanitary Napkin Core Pad Assembly', 'WIP', 'PCS', 70, 0, 230, 0, 1.62, 28000, 'Active', 'Semi-finished absorbent pad core assembly'],
+      ['WIP-280-CORE', '280mm Ultra Thin Absorbent Core Assembly', 'WIP', 'PCS', 75, 0, 280, 0, 2.15, 22000, 'Active', 'Wings semi-finished core pad assembly'],
+      ['WIP-320-CORE', '320mm Extra Heavy Flow Core Pad Assembly', 'WIP', 'PCS', 80, 0, 320, 0, 2.68, 15000, 'Active', 'Overnight maximum absorbency core pad'],
+      ['WIP-155-PANTY', '155mm Daily Fresh Pantyliner Core Assembly', 'WIP', 'PCS', 55, 0, 155, 0, 0.95, 34000, 'Active', 'Ultra-thin daily breathable liner pad'],
+
+      // Finished Goods Products
+      ['FG-240-REG-10P', '240mm Regular Straight Sanitary Napkins (Pack of 10)', 'Finished Goods', 'PKT', 0, 0, 0, 0, 38.50, 12000, 'Active', 'Regular pads retail pack of 10'],
+      ['FG-280-ULTRA-8P', '280mm Ultra Thin Wings Sanitary Napkins (Pack of 8)', 'Finished Goods', 'PKT', 0, 0, 0, 0, 46.00, 9500, 'Active', 'Ultra-thin wings retail pack of 8'],
+      ['FG-320-NIGHT-6P', '320mm Extra Heavy Overnight Wings (Pack of 6)', 'Finished Goods', 'PKT', 0, 0, 0, 0, 52.00, 7200, 'Active', 'Night wings retail pack of 6'],
+      ['FG-155-DAILY-20P', '155mm Daily Fresh Breathable Pantyliners (Pack of 20)', 'Finished Goods', 'PKT', 0, 0, 0, 0, 42.00, 8800, 'Active', 'Pantyliners retail pack of 20']
+    ];
+    sheet.getRange(2, 1, sampleItems.length, sampleItems[0].length).setValues(sampleItems);
+  }
+}
+
+function seedInventoryValuation(ss) {
+  var sheet = ss.getSheetByName('Inventory_Valuation');
+  if (sheet.getLastRow() <= 1) {
+    var sampleInventory = [
+      ['RM-NW-001', 'Non-Woven Hydrophilic Top Sheet', 'Raw Material', 'KG', 12500, 310.00, 0, '2026-11-01', 'Active'],
+      ['RM-AD-002', 'Airlaid Paper with SAP Core', 'Raw Material', 'KG', 9800, 420.00, 0, '2026-11-02', 'Active'],
+      ['RM-SAP-003', 'Sumitomo Super Absorbent Polymer (SAP)', 'Raw Material', 'KG', 6500, 580.00, 0, '2026-10-28', 'Active'],
+      ['RM-PE-004', 'Breathable PE Backsheet Film 18 GSM', 'Raw Material', 'KG', 14200, 290.00, 0, '2026-11-05', 'Active'],
+      ['RM-RP-005', 'Silicone Coated Release Paper Strip', 'Raw Material', 'KG', 4800, 240.00, 0, '2026-11-03', 'Active'],
+      ['RM-HMA-006', 'Hot Melt Construction Adhesive', 'Raw Material', 'KG', 3500, 480.00, 0, '2026-10-25', 'Active'],
+      ['RM-HMP-007', 'Positioning Pressure Sensitive Adhesive', 'Raw Material', 'KG', 2900, 510.00, 0, '2026-10-29', 'Active'],
+      ['RM-WF-008', 'Individual Wrapper Pouch Film', 'Raw Material', 'KG', 8400, 330.00, 0, '2026-11-04', 'Active'],
+      ['RM-TT-009', 'Easy-Tape Tear Tab Strip', 'Raw Material', 'KG', 1800, 410.00, 0, '2026-11-01', 'Active'],
+      ['PM-PC-010', 'Primary Printed Outer Pouch (Pack of 10)', 'Packaging Material', 'PCS', 45000, 0, 4.50, '2026-11-08', 'Active'],
+      ['PM-MC-011', 'Master Corrugated Shipper Carton (48 Packs)', 'Packaging Material', 'PCS', 3200, 0, 45.00, '2026-11-07', 'Active'],
+      ['PM-TP-012', 'Bopp Packaging Tape 2-inch', 'Packaging Material', 'ROLL', 650, 0, 85.00, '2026-11-06', 'Active']
+    ];
+    sheet.getRange(2, 1, sampleInventory.length, sampleInventory[0].length).setValues(sampleInventory);
+  }
+}
+
+function seedDefaultBOMs(ss) {
+  var routineSheet = ss.getSheetByName('BOM_Routines');
+  if (routineSheet.getLastRow() <= 1) {
+    var wipRoutineId = 'RT-WIP-240-001';
+    var fgRoutineId = 'RT-FG-240-001';
+
+    // 1. Seed WIP Routine
+    routineSheet.appendRow([
+      wipRoutineId,
+      'RT-240MM REGULAR STRAIGHT WIP',
+      '240MM REGULAR STRAIGHT WIP',
+      'WIP',
+      'WIP-240-CORE',
+      '240mm Sanitary Napkin Core Pad Assembly',
+      1000,
+      'PCS',
+      '',
+      '2026-11-01',
+      'Active',
+      'Rev 1.0',
+      'Absorbent Core assembly for 240mm regular straight pads',
+      new Date().toISOString(),
+      new Date().toISOString()
+    ]);
+
+    // WIP Issues
+    var wipIssueSheet = ss.getSheetByName('BOM_WIP_Issues');
+    var wipIssues = [
+      ['WIP-ISS-01', wipRoutineId, 'RM-NW-001', 'Non-Woven Hydrophilic Top Sheet', 70, 40, 230, 310.00, 0.644, 199.64, 'Top sheet layer'],
+      ['WIP-ISS-02', wipRoutineId, 'RM-AD-002', 'Airlaid Paper with SAP Core', 60, 120, 200, 420.00, 1.440, 604.80, 'Main absorbent core'],
+      ['WIP-ISS-03', wipRoutineId, 'RM-SAP-003', 'Sumitomo Super Absorbent Polymer (SAP)', 50, 50, 180, 580.00, 0.450, 261.00, 'Super absorbent granules'],
+      ['WIP-ISS-04', wipRoutineId, 'RM-PE-004', 'Breathable PE Backsheet Film 18 GSM', 75, 18, 235, 290.00, 0.317, 91.93, 'Leakproof barrier'],
+      ['WIP-ISS-05', wipRoutineId, 'RM-RP-005', 'Silicone Coated Release Paper Strip', 45, 42, 190, 240.00, 0.359, 86.16, 'Adhesive back cover'],
+      ['WIP-ISS-06', wipRoutineId, 'RM-HMA-006', 'Hot Melt Construction Adhesive', 0, 0, 0, 480.00, 0.500, 240.00, 'Direct line spray application'],
+      ['WIP-ISS-07', wipRoutineId, 'RM-HMP-007', 'Positioning Pressure Sensitive Adhesive', 0, 0, 0, 510.00, 0.350, 178.50, 'Garment attachment strips']
+    ];
+    wipIssueSheet.getRange(2, 1, wipIssues.length, wipIssues[0].length).setValues(wipIssues);
+
+    // WIP Receipts
+    var totalWipIssueAmount = 199.64 + 604.80 + 261.00 + 91.93 + 86.16 + 240.00 + 178.50; // 1662.03
+    var wipReceiptSheet = ss.getSheetByName('BOM_WIP_Receipts');
+    wipReceiptSheet.appendRow([
+      'WIP-REC-01',
+      wipRoutineId,
+      'WIP-240-CORE',
+      '240mm Sanitary Napkin Core Pad Assembly',
+      'PCS',
+      1000,
+      parseFloat(totalWipIssueAmount.toFixed(2))
+    ]);
+
+    // 2. Seed FG Routine linked to WIP Routine
+    routineSheet.appendRow([
+      fgRoutineId,
+      'RT-240MM REGULAR STRAIGHT FG',
+      '240MM REGULAR STRAIGHT FG',
+      'Finished Goods',
+      'FG-240-REG-10P',
+      '240mm Regular Straight Sanitary Napkins (Pack of 10)',
+      100, // 100 packs of 10 pcs = 1000 pcs WIP consumed
+      'PKT',
+      wipRoutineId,
+      '2026-11-01',
+      'Active',
+      'Rev 1.0',
+      'Final packaged goods with primary pouch and master packaging',
+      new Date().toISOString(),
+      new Date().toISOString()
+    ]);
+
+    // FG Issues (First item is WIP Receipt output!)
+    var fgIssueSheet = ss.getSheetByName('BOM_FG_Issues');
+    var fgIssues = [
+      ['FG-ISS-01', fgRoutineId, 'WIP-240-CORE', '240mm Sanitary Napkin Core Pad Assembly', 'PCS', 1000, parseFloat(totalWipIssueAmount.toFixed(2)), 'Yes', wipRoutineId, 'From WIP Process Production Receipt'],
+      ['FG-ISS-02', fgRoutineId, 'RM-WF-008', 'Individual Wrapper Pouch Film', 'KG', 0.85, 280.50, 'No', '', '1000 wrapper wraps (0.85g / pc)'],
+      ['FG-ISS-03', fgRoutineId, 'RM-TT-009', 'Easy-Tape Tear Tab Strip', 'KG', 0.12, 49.20, 'No', '', 'Tear strip for wrapper'],
+      ['FG-ISS-04', fgRoutineId, 'PM-PC-010', 'Primary Printed Outer Pouch (Pack of 10)', 'PCS', 100, 450.00, 'No', '', '100 pouches for 10-pad pack'],
+      ['FG-ISS-05', fgRoutineId, 'PM-MC-011', 'Master Corrugated Shipper Carton (48 Packs)', 'PCS', 2.08, 93.60, 'No', '', 'Shipper cartons for packing']
+    ];
+    fgIssueSheet.getRange(2, 1, fgIssues.length, fgIssues[0].length).setValues(fgIssues);
+
+    // FG Receipts
+    var totalFgIssueAmount = totalWipIssueAmount + 280.50 + 49.20 + 450.00 + 93.60;
+    var fgReceiptSheet = ss.getSheetByName('BOM_FG_Receipts');
+    fgReceiptSheet.appendRow([
+      'FG-REC-01',
+      fgRoutineId,
+      'FG-240-REG-10P',
+      '240mm Regular Straight Sanitary Napkins (Pack of 10)',
+      'PKT',
+      100,
+      parseFloat(totalFgIssueAmount.toFixed(2))
+    ]);
+  }
+}
+
+function getItemMaster() {
+  try {
+    var ss = getTargetSpreadsheet();
+    var sheet = ss.getSheetByName('Item_Master');
+    if (!sheet) {
+      initializeDatabase();
+      sheet = ss.getSheetByName('Item_Master');
+    }
+    var data = sheet.getDataRange().getValues();
+    if (data.length <= 1) {
+      // Fallback to Inventory_Valuation if Item_Master is empty
+      return getInventoryValuation();
+    }
+
+    var items = [];
+    for (var i = 1; i < data.length; i++) {
+      var row = data[i];
+      if (!row[0]) continue;
+      items.push({
+        itemCode: String(row[0]).trim(),
+        itemName: String(row[1]).trim(),
+        category: String(row[2]).trim(),
+        unit: String(row[3]).trim(),
+        widthMM: Number(row[4]) || 0,
+        gsm: Number(row[5]) || 0,
+        lengthMM: Number(row[6]) || 0,
+        ratePerKG: Number(row[7]) || 0,
+        ratePerUnit: Number(row[8]) || 0,
+        currentStock: Number(row[9]) || 0,
+        status: String(row[10] || 'Active').trim(),
+        description: String(row[11] || '').trim()
+      });
+    }
+    return items;
+  } catch (err) {
+    return getInventoryValuation();
+  }
+}
+
+function exportProductionRunToSheet(payload) {
+  try {
+    return saveProductionRun(payload);
+  } catch (err) {
+    throw new Error('Export to sheet failed: ' + err.message);
+  }
+}
+
+function getInventoryValuation() {
+  try {
+    var ss = getTargetSpreadsheet();
+    var sheet = ss.getSheetByName('Inventory_Valuation');
+    if (!sheet) {
+      initializeDatabase();
+      sheet = ss.getSheetByName('Inventory_Valuation');
+    }
+    var data = sheet.getDataRange().getValues();
+    if (data.length <= 1) return [];
+
+    var headers = data[0];
+    var items = [];
+    for (var i = 1; i < data.length; i++) {
+      var row = data[i];
+      if (!row[0]) continue;
+      items.push({
+        itemCode: String(row[0]),
+        itemName: String(row[1]),
+        category: String(row[2]),
+        unit: String(row[3]),
+        currentStock: Number(row[4]) || 0,
+        ratePerKG: Number(row[5]) || 0,
+        ratePerUnit: Number(row[6]) || 0,
+        lastPurchaseDate: row[7] ? formatDateString(row[7]) : '',
+        status: String(row[8] || 'Active')
+      });
+    }
+    return items;
+  } catch (err) {
+    throw new Error('Error getting inventory valuation: ' + err.message);
+  }
+}
+
+function getBOMRoutines(category) {
+  try {
+    var ss = getTargetSpreadsheet();
+    var sheet = ss.getSheetByName('BOM_Routines');
+    if (!sheet) {
+      initializeDatabase();
+      sheet = ss.getSheetByName('BOM_Routines');
+    }
+
+    var data = sheet.getDataRange().getValues();
+    if (data.length <= 1) return [];
+
+    var routines = [];
+    for (var i = 1; i < data.length; i++) {
+      var row = data[i];
+      if (!row[0]) continue;
+
+      var rCategory = String(row[3]);
+      if (category && rCategory.toLowerCase() !== category.toLowerCase()) {
+        continue;
+      }
+
+      routines.push({
+        routineId: String(row[0]),
+        routineName: String(row[1]),
+        bomName: String(row[2]),
+        processCategory: rCategory,
+        parentItemCode: String(row[4]),
+        productName: String(row[5]),
+        baseQuantity: Number(row[6]) || 1000,
+        unit: String(row[7] || 'PCS'),
+        linkedWIPRoutineId: String(row[8] || ''),
+        effectiveDate: row[9] ? formatDateString(row[9]) : '',
+        status: String(row[10] || 'Active'),
+        revision: String(row[11] || 'Rev 1.0'),
+        description: String(row[12] || ''),
+        createdAt: row[13] ? formatDateString(row[13]) : '',
+        updatedAt: row[14] ? formatDateString(row[14]) : ''
+      });
+    }
+
+    // Sort alphabetically by routine name for 100+ routines
+    routines.sort(function(a, b) {
+      return a.routineName.localeCompare(b.routineName);
+    });
+
+    return routines;
+  } catch (err) {
+    throw new Error('Error loading BOM routines: ' + err.message);
+  }
+}
+
+function getBOMDetails(routineId) {
+  try {
+    var ss = getTargetSpreadsheet();
+    var routineSheet = ss.getSheetByName('BOM_Routines');
+    var routineRows = routineSheet.getDataRange().getValues();
+    var routine = null;
+
+    for (var i = 1; i < routineRows.length; i++) {
+      if (String(routineRows[i][0]) === routineId) {
+        var r = routineRows[i];
+        routine = {
+          routineId: String(r[0]),
+          routineName: String(r[1]),
+          bomName: String(r[2]),
+          processCategory: String(r[3]),
+          parentItemCode: String(r[4]),
+          productName: String(r[5]),
+          baseQuantity: Number(r[6]) || 1000,
+          unit: String(r[7] || 'PCS'),
+          linkedWIPRoutineId: String(r[8] || ''),
+          effectiveDate: r[9] ? formatDateString(r[9]) : '',
+          status: String(r[10] || 'Active'),
+          revision: String(r[11] || 'Rev 1.0'),
+          description: String(r[12] || '')
+        };
+        break;
+      }
+    }
+
+    if (!routine) throw new Error('BOM Routine not found: ' + routineId);
+
+    var isWIP = (routine.processCategory === 'WIP');
+    var issues = [];
+    var receipts = [];
+
+    if (isWIP) {
+      // WIP Issues
+      var wipIssueSheet = ss.getSheetByName('BOM_WIP_Issues');
+      var wipIssueRows = wipIssueSheet.getDataRange().getValues();
+      for (var j = 1; j < wipIssueRows.length; j++) {
+        var ir = wipIssueRows[j];
+        if (String(ir[1]) === routineId) {
+          issues.push({
+            issueId: String(ir[0]),
+            routineId: String(ir[1]),
+            itemCode: String(ir[2]),
+            itemName: String(ir[3]),
+            width: Number(ir[4]) || 0,
+            gsm: Number(ir[5]) || 0,
+            length: Number(ir[6]) || 0,
+            ratePerKG: Number(ir[7]) || 0,
+            weightPerPiece: Number(ir[8]) || 0,
+            expectedAmount: Number(ir[9]) || 0,
+            remarks: String(ir[10] || '')
+          });
+        }
+      }
+
+      // WIP Receipts
+      var wipReceiptSheet = ss.getSheetByName('BOM_WIP_Receipts');
+      var wipReceiptRows = wipReceiptSheet.getDataRange().getValues();
+      for (var k = 1; k < wipReceiptRows.length; k++) {
+        var rr = wipReceiptRows[k];
+        if (String(rr[1]) === routineId) {
+          receipts.push({
+            receiptId: String(rr[0]),
+            routineId: String(rr[1]),
+            itemCode: String(rr[2]),
+            itemName: String(rr[3]),
+            unit: String(rr[4]),
+            quantity: Number(rr[5]) || 0,
+            amount: Number(rr[6]) || 0
+          });
+        }
+      }
+    } else {
+      // FG Issues
+      var fgIssueSheet = ss.getSheetByName('BOM_FG_Issues');
+      var fgIssueRows = fgIssueSheet.getDataRange().getValues();
+      for (var m = 1; m < fgIssueRows.length; m++) {
+        var fir = fgIssueRows[m];
+        if (String(fir[1]) === routineId) {
+          issues.push({
+            issueId: String(fir[0]),
+            routineId: String(fir[1]),
+            itemCode: String(fir[2]),
+            itemName: String(fir[3]),
+            unit: String(fir[4]),
+            quantity: Number(fir[5]) || 0,
+            amount: Number(fir[6]) || 0,
+            isWIPReceiptItem: String(fir[7]) === 'Yes',
+            linkedWIPRoutineId: String(fir[8] || ''),
+            remarks: String(fir[9] || '')
+          });
+        }
+      }
+
+      // FG Receipts
+      var fgReceiptSheet = ss.getSheetByName('BOM_FG_Receipts');
+      var fgReceiptRows = fgReceiptSheet.getDataRange().getValues();
+      for (var n = 1; n < fgReceiptRows.length; n++) {
+        var frr = fgReceiptRows[n];
+        if (String(frr[1]) === routineId) {
+          receipts.push({
+            receiptId: String(frr[0]),
+            routineId: String(frr[1]),
+            itemCode: String(frr[2]),
+            itemName: String(frr[3]),
+            unit: String(frr[4]),
+            quantity: Number(frr[5]) || 0,
+            amount: Number(frr[6]) || 0
+          });
+        }
+      }
+    }
+
+    return {
+      routine: routine,
+      issues: issues,
+      receipts: receipts
+    };
+  } catch (err) {
+    throw new Error('Failed to load BOM: ' + err.message);
+  }
+}
+
+function saveWIPBOM(payload) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+
+  try {
+    var ss = getTargetSpreadsheet();
+    var routineSheet = ss.getSheetByName('BOM_Routines');
+    var issueSheet = ss.getSheetByName('BOM_WIP_Issues');
+    var receiptSheet = ss.getSheetByName('BOM_WIP_Receipts');
+
+    var bomName = (payload.bomName || '').trim();
+    if (!bomName) throw new Error('BOM Name is required');
+
+    // Naming rule: RT-{BOM Name}
+    var cleanBomName = bomName.replace(/^RT-/, '').trim();
+    var autoRoutineName = 'RT-' + cleanBomName;
+
+    var routineId = (payload.routineId || '').trim();
+    var isNew = (!routineId || routineId === 'NEW' || routineId === 'null' || routineId.indexOf('DRAFT') !== -1);
+    if (isNew) {
+      routineId = 'RT-WIP-' + Utilities.formatDate(new Date(), 'GMT+5:45', 'yyyyMMdd-HHmmss');
+    }
+
+    var baseQty = Number(payload.baseQuantity) || 1000;
+    var baseUnit = payload.unit || 'PCS';
+    var nowIso = new Date().toISOString();
+
+    // 1. Process Issues and calculate totals
+    var totalIssueAmount = 0;
+    var processedIssues = [];
+
+    (payload.issues || []).forEach(function(row, idx) {
+      var width = Number(row.width) || 0;
+      var gsm = Number(row.gsm) || 0;
+      var length = Number(row.length) || 0;
+      var rate = Number(row.ratePerKG) || 0;
+
+      // Weight per piece calculation: (width * gsm * length) / 1000000
+      var weightPerPiece = 0;
+      if (width > 0 && gsm > 0 && length > 0) {
+        weightPerPiece = (width * gsm * length) / 1000000;
+      } else {
+        weightPerPiece = Number(row.weightPerPiece) || 0;
+      }
+      weightPerPiece = parseFloat(weightPerPiece.toFixed(5));
+
+      // Expected Amount: (weightPerPiece in grams * baseQty / 1000) * ratePerKG
+      var expectedAmount = 0;
+      if (weightPerPiece > 0 && rate > 0) {
+        expectedAmount = (weightPerPiece * baseQty / 1000) * rate;
+      } else {
+        expectedAmount = Number(row.expectedAmount) || 0;
+      }
+      expectedAmount = parseFloat(expectedAmount.toFixed(2));
+      totalIssueAmount += expectedAmount;
+
+      processedIssues.push([
+        row.issueId || ('WIP-ISS-' + (idx + 1) + '-' + Utilities.formatDate(new Date(), 'GMT', 'mmss')),
+        routineId,
+        row.itemCode || '',
+        row.itemName || '',
+        width,
+        gsm,
+        length,
+        rate,
+        weightPerPiece,
+        expectedAmount,
+        row.remarks || ''
+      ]);
+    });
+
+    // 2. Process Receipts
+    var processedReceipts = [];
+    var receiptsInput = payload.receipts || [];
+    if (receiptsInput.length === 0) {
+      // Default to 1 WIP item receipt based on parent product
+      processedReceipts.push([
+        'WIP-REC-01-' + Utilities.formatDate(new Date(), 'GMT', 'mmss'),
+        routineId,
+        payload.parentItemCode || 'WIP-PAD-CORE',
+        payload.productName || (cleanBomName + ' Core Pad'),
+        baseUnit,
+        baseQty,
+        parseFloat(totalIssueAmount.toFixed(2))
+      ]);
+    } else {
+      receiptsInput.forEach(function(r, idx) {
+        var rAmount = Number(r.amount);
+        if (isNaN(rAmount) || rAmount <= 0) {
+          rAmount = totalIssueAmount;
+        }
+        processedReceipts.push([
+          r.receiptId || ('WIP-REC-' + (idx + 1) + '-' + Utilities.formatDate(new Date(), 'GMT', 'mmss')),
+          routineId,
+          r.itemCode || payload.parentItemCode || '',
+          r.itemName || payload.productName || '',
+          r.unit || baseUnit,
+          Number(r.quantity) || baseQty,
+          parseFloat(rAmount.toFixed(2))
+        ]);
+      });
+    }
+
+    // 3. Save Routine Header
+    var rData = routineSheet.getDataRange().getValues();
+    var existingRowIndex = -1;
+    for (var i = 1; i < rData.length; i++) {
+      if (String(rData[i][0]) === routineId) {
+        existingRowIndex = i + 1;
+        break;
+      }
+    }
+
+    var routineRowValues = [
+      routineId,
+      autoRoutineName,
+      cleanBomName,
+      'WIP',
+      payload.parentItemCode || '',
+      payload.productName || cleanBomName,
+      baseQty,
+      baseUnit,
+      '',
+      payload.effectiveDate || Utilities.formatDate(new Date(), 'GMT+5:45', 'yyyy-MM-dd'),
+      payload.status || 'Active',
+      payload.revision || 'Rev 1.0',
+      payload.description || '',
+      isNew ? nowIso : rData[existingRowIndex - 1][13],
+      nowIso
+    ];
+
+    if (existingRowIndex > 0) {
+      routineSheet.getRange(existingRowIndex, 1, 1, routineRowValues.length).setValues([routineRowValues]);
+    } else {
+      routineSheet.appendRow(routineRowValues);
+    }
+
+    // 4. Replace Issues for this RoutineID
+    deleteRowsByMatchingColumn(issueSheet, 2, routineId);
+    if (processedIssues.length > 0) {
+      issueSheet.getRange(issueSheet.getLastRow() + 1, 1, processedIssues.length, processedIssues[0].length).setValues(processedIssues);
+    }
+
+    // 5. Replace Receipts for this RoutineID
+    deleteRowsByMatchingColumn(receiptSheet, 2, routineId);
+    if (processedReceipts.length > 0) {
+      receiptSheet.getRange(receiptSheet.getLastRow() + 1, 1, processedReceipts.length, processedReceipts[0].length).setValues(processedReceipts);
+    }
+
+    return {
+      success: true,
+      message: 'WIP Process BOM saved successfully as ' + autoRoutineName,
+      routineId: routineId,
+      routineName: autoRoutineName,
+      totalIssueAmount: totalIssueAmount
+    };
+  } catch (err) {
+    throw new Error('Error saving WIP BOM: ' + err.message);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function saveFGBOM(payload) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+
+  try {
+    var ss = getTargetSpreadsheet();
+    var routineSheet = ss.getSheetByName('BOM_Routines');
+    var issueSheet = ss.getSheetByName('BOM_FG_Issues');
+    var receiptSheet = ss.getSheetByName('BOM_FG_Receipts');
+
+    var bomName = (payload.bomName || '').trim();
+    if (!bomName) throw new Error('BOM Name is required');
+
+    var cleanBomName = bomName.replace(/^RT-/, '').trim();
+    var autoRoutineName = 'RT-' + cleanBomName;
+
+    var routineId = (payload.routineId || '').trim();
+    var isNew = (!routineId || routineId === 'NEW' || routineId === 'null' || routineId.indexOf('DRAFT') !== -1);
+    if (isNew) {
+      routineId = 'RT-FG-' + Utilities.formatDate(new Date(), 'GMT+5:45', 'yyyyMMdd-HHmmss');
+    }
+
+    var baseQty = Number(payload.baseQuantity) || 100;
+    var baseUnit = payload.unit || 'PKT';
+    var nowIso = new Date().toISOString();
+
+    // 1. Process FG Issues
+    var totalIssueAmount = 0;
+    var processedIssues = [];
+
+    (payload.issues || []).forEach(function(row, idx) {
+      var qty = Number(row.quantity) || 0;
+      var amt = Number(row.amount) || 0;
+      amt = parseFloat(amt.toFixed(2));
+      totalIssueAmount += amt;
+
+      processedIssues.push([
+        row.issueId || ('FG-ISS-' + (idx + 1) + '-' + Utilities.formatDate(new Date(), 'GMT', 'mmss')),
+        routineId,
+        row.itemCode || '',
+        row.itemName || '',
+        row.unit || 'PCS',
+        qty,
+        amt,
+        row.isWIPReceiptItem ? 'Yes' : 'No',
+        row.linkedWIPRoutineId || payload.linkedWIPRoutineId || '',
+        row.remarks || ''
+      ]);
+    });
+
+    // 2. Process FG Receipts
+    var processedReceipts = [];
+    var receiptsInput = payload.receipts || [];
+    if (receiptsInput.length === 0) {
+      processedReceipts.push([
+        'FG-REC-01-' + Utilities.formatDate(new Date(), 'GMT', 'mmss'),
+        routineId,
+        payload.parentItemCode || 'FG-PROD-001',
+        payload.productName || cleanBomName,
+        baseUnit,
+        baseQty,
+        parseFloat(totalIssueAmount.toFixed(2))
+      ]);
+    } else {
+      receiptsInput.forEach(function(r, idx) {
+        var rAmount = Number(r.amount);
+        if (isNaN(rAmount) || rAmount <= 0) {
+          rAmount = totalIssueAmount;
+        }
+        processedReceipts.push([
+          r.receiptId || ('FG-REC-' + (idx + 1) + '-' + Utilities.formatDate(new Date(), 'GMT', 'mmss')),
+          routineId,
+          r.itemCode || payload.parentItemCode || '',
+          r.itemName || payload.productName || '',
+          r.unit || baseUnit,
+          Number(r.quantity) || baseQty,
+          parseFloat(rAmount.toFixed(2))
+        ]);
+      });
+    }
+
+    // 3. Save Routine Header
+    var rData = routineSheet.getDataRange().getValues();
+    var existingRowIndex = -1;
+    for (var i = 1; i < rData.length; i++) {
+      if (String(rData[i][0]) === routineId) {
+        existingRowIndex = i + 1;
+        break;
+      }
+    }
+
+    var routineRowValues = [
+      routineId,
+      autoRoutineName,
+      cleanBomName,
+      'Finished Goods',
+      payload.parentItemCode || '',
+      payload.productName || cleanBomName,
+      baseQty,
+      baseUnit,
+      payload.linkedWIPRoutineId || '',
+      payload.effectiveDate || Utilities.formatDate(new Date(), 'GMT+5:45', 'yyyy-MM-dd'),
+      payload.status || 'Active',
+      payload.revision || 'Rev 1.0',
+      payload.description || '',
+      isNew ? nowIso : rData[existingRowIndex - 1][13],
+      nowIso
+    ];
+
+    if (existingRowIndex > 0) {
+      routineSheet.getRange(existingRowIndex, 1, 1, routineRowValues.length).setValues([routineRowValues]);
+    } else {
+      routineSheet.appendRow(routineRowValues);
+    }
+
+    // 4. Replace FG Issues
+    deleteRowsByMatchingColumn(issueSheet, 2, routineId);
+    if (processedIssues.length > 0) {
+      issueSheet.getRange(issueSheet.getLastRow() + 1, 1, processedIssues.length, processedIssues[0].length).setValues(processedIssues);
+    }
+
+    // 5. Replace FG Receipts
+    deleteRowsByMatchingColumn(receiptSheet, 2, routineId);
+    if (processedReceipts.length > 0) {
+      receiptSheet.getRange(receiptSheet.getLastRow() + 1, 1, processedReceipts.length, processedReceipts[0].length).setValues(processedReceipts);
+    }
+
+    return {
+      success: true,
+      message: 'Finished Goods Process BOM saved successfully as ' + autoRoutineName,
+      routineId: routineId,
+      routineName: autoRoutineName,
+      totalIssueAmount: totalIssueAmount
+    };
+  } catch (err) {
+    throw new Error('Error saving FG BOM: ' + err.message);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function deleteBOM(routineId) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+
+  try {
+    var ss = getTargetSpreadsheet();
+    var routineSheet = ss.getSheetByName('BOM_Routines');
+    var wipIssueSheet = ss.getSheetByName('BOM_WIP_Issues');
+    var wipReceiptSheet = ss.getSheetByName('BOM_WIP_Receipts');
+    var fgIssueSheet = ss.getSheetByName('BOM_FG_Issues');
+    var fgReceiptSheet = ss.getSheetByName('BOM_FG_Receipts');
+
+    deleteRowsByMatchingColumn(routineSheet, 1, routineId);
+    deleteRowsByMatchingColumn(wipIssueSheet, 2, routineId);
+    deleteRowsByMatchingColumn(wipReceiptSheet, 2, routineId);
+    deleteRowsByMatchingColumn(fgIssueSheet, 2, routineId);
+    deleteRowsByMatchingColumn(fgReceiptSheet, 2, routineId);
+
+    return {
+      success: true,
+      message: 'BOM routine ' + routineId + ' deleted successfully.'
+    };
+  } catch (err) {
+    throw new Error('Failed to delete BOM: ' + err.message);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function cloneBOMRoutine(sourceRoutineId, newBomName) {
+  try {
+    var sourceData = getBOMDetails(sourceRoutineId);
+    if (!sourceData || !sourceData.routine) {
+      throw new Error('Source routine not found: ' + sourceRoutineId);
+    }
+
+    var cleanName = (newBomName || (sourceData.routine.bomName + ' COPY')).trim().replace(/^RT-/, '');
+    var isWIP = (sourceData.routine.processCategory === 'WIP');
+
+    var newPayload = {
+      routineId: 'NEW',
+      bomName: cleanName,
+      routineName: 'RT-' + cleanName,
+      processCategory: sourceData.routine.processCategory,
+      parentItemCode: sourceData.routine.parentItemCode ? (sourceData.routine.parentItemCode + '-COPY') : '',
+      productName: sourceData.routine.productName ? (sourceData.routine.productName + ' (Copy)') : cleanName,
+      baseQuantity: sourceData.routine.baseQuantity || (isWIP ? 1000 : 100),
+      unit: sourceData.routine.unit || (isWIP ? 'PCS' : 'PKT'),
+      linkedWIPRoutineId: sourceData.routine.linkedWIPRoutineId || '',
+      effectiveDate: Utilities.formatDate(new Date(), 'GMT+5:45', 'yyyy-MM-dd'),
+      status: 'Active',
+      revision: 'Rev 1.0',
+      description: 'Cloned from ' + sourceData.routine.routineName,
+      issues: sourceData.issues || [],
+      receipts: sourceData.receipts || []
+    };
+
+    return isWIP ? saveWIPBOM(newPayload) : saveFGBOM(newPayload);
+  } catch (err) {
+    throw new Error('Failed to clone routine: ' + err.message);
+  }
+}
+
+function saveProductionRun(payload) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+
+  try {
+    var ss = getTargetSpreadsheet();
+    var runSheet = ss.getSheetByName('Production_Runs');
+    var issueSheet = ss.getSheetByName('Production_Run_Issues');
+    var receiptSheet = ss.getSheetByName('Production_Run_Receipts');
+
+    var runId = 'RUN-' + Utilities.formatDate(new Date(), 'GMT+5:45', 'yyyyMMdd-HHmmss');
+    var prodDate = payload.productionDate || Utilities.formatDate(new Date(), 'GMT+5:45', 'yyyy-MM-dd');
+    var routineId = payload.routineId || '';
+    var routineName = payload.routineName || '';
+    var plannedQty = Number(payload.plannedQuantity) || 0;
+    var unit = payload.unit || 'PCS';
+
+    var totalIssueVariance = 0;
+    var processedIssues = [];
+
+    (payload.issues || []).forEach(function(item, idx) {
+      var bomQty = Number(item.bomQuantity) || 0;
+      var actQty = Number(item.actualQuantity) || 0;
+      var variance = actQty - bomQty;
+      variance = parseFloat(variance.toFixed(3));
+      totalIssueVariance += variance;
+
+      processedIssues.push([
+        'RUN-ISS-' + (idx + 1) + '-' + runId,
+        runId,
+        item.itemCode || '',
+        item.itemName || '',
+        item.unit || 'KG',
+        bomQty,
+        actQty,
+        variance,
+        Number(item.weightPerPiece) || 0,
+        Number(item.rate) || 0,
+        item.remarks || ''
+      ]);
+    });
+
+    var totalReceiptVariance = 0;
+    var processedReceipts = [];
+
+    (payload.receipts || []).forEach(function(item, idx) {
+      var bomQty = Number(item.bomQuantity) || 0;
+      var actQty = Number(item.actualQuantity) || 0;
+      var variance = actQty - bomQty;
+      variance = parseFloat(variance.toFixed(3));
+      totalReceiptVariance += variance;
+
+      processedReceipts.push([
+        'RUN-REC-' + (idx + 1) + '-' + runId,
+        runId,
+        item.itemCode || '',
+        item.itemName || '',
+        item.unit || unit,
+        bomQty,
+        actQty,
+        variance,
+        item.remarks || ''
+      ]);
+    });
+
+    // Append Header
+    runSheet.appendRow([
+      runId,
+      prodDate,
+      routineId,
+      routineName,
+      payload.processCategory || 'WIP',
+      plannedQty,
+      unit,
+      'Completed',
+      parseFloat(totalIssueVariance.toFixed(3)),
+      parseFloat(totalReceiptVariance.toFixed(3)),
+      new Date().toISOString(),
+      payload.recordedBy || 'Production Supervisor',
+      payload.remarks || ''
+    ]);
+
+    if (processedIssues.length > 0) {
+      issueSheet.getRange(issueSheet.getLastRow() + 1, 1, processedIssues.length, processedIssues[0].length).setValues(processedIssues);
+    }
+
+    if (processedReceipts.length > 0) {
+      receiptSheet.getRange(receiptSheet.getLastRow() + 1, 1, processedReceipts.length, processedReceipts[0].length).setValues(processedReceipts);
+    }
+
+    return {
+      success: true,
+      runId: runId,
+      message: 'Production Issue and Receipt recorded successfully on ' + prodDate + ' under Run ID: ' + runId
+    };
+  } catch (err) {
+    throw new Error('Failed to save production run: ' + err.message);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function getProductionRuns() {
+  try {
+    var ss = getTargetSpreadsheet();
+    var sheet = ss.getSheetByName('Production_Runs');
+    if (!sheet) return [];
+
+    var data = sheet.getDataRange().getValues();
+    if (data.length <= 1) return [];
+
+    var runs = [];
+    for (var i = data.length - 1; i >= 1; i--) {
+      var row = data[i];
+      if (!row[0]) continue;
+      runs.push({
+        runId: String(row[0]),
+        productionDate: row[1] ? formatDateString(row[1]) : '',
+        routineId: String(row[2]),
+        routineName: String(row[3]),
+        processCategory: String(row[4]),
+        plannedQuantity: Number(row[5]) || 0,
+        unit: String(row[6]),
+        status: String(row[7]),
+        totalIssueVariance: Number(row[8]) || 0,
+        totalReceiptVariance: Number(row[9]) || 0,
+        recordedAt: row[10] ? formatDateString(row[10]) : '',
+        recordedBy: String(row[11] || ''),
+        remarks: String(row[12] || '')
+      });
+    }
+    return runs;
+  } catch (err) {
+    throw new Error('Error loading production runs: ' + err.message);
+  }
+}
+
+function getProductionRunDetails(runId) {
+  try {
+    var ss = getTargetSpreadsheet();
+    var runSheet = ss.getSheetByName('Production_Runs');
+    var issueSheet = ss.getSheetByName('Production_Run_Issues');
+    var receiptSheet = ss.getSheetByName('Production_Run_Receipts');
+
+    var runRows = runSheet.getDataRange().getValues();
+    var run = null;
+    for (var i = 1; i < runRows.length; i++) {
+      if (String(runRows[i][0]) === runId) {
+        var r = runRows[i];
+        run = {
+          runId: String(r[0]),
+          productionDate: r[1] ? formatDateString(r[1]) : '',
+          routineId: String(r[2]),
+          routineName: String(r[3]),
+          processCategory: String(r[4]),
+          plannedQuantity: Number(r[5]) || 0,
+          unit: String(r[6]),
+          status: String(r[7]),
+          totalIssueVariance: Number(r[8]) || 0,
+          totalReceiptVariance: Number(r[9]) || 0,
+          recordedAt: r[10] ? formatDateString(r[10]) : '',
+          recordedBy: String(r[11] || ''),
+          remarks: String(r[12] || '')
+        };
+        break;
+      }
+    }
+
+    if (!run) throw new Error('Production run not found: ' + runId);
+
+    var issues = [];
+    var issueRows = issueSheet.getDataRange().getValues();
+    for (var j = 1; j < issueRows.length; j++) {
+      if (String(issueRows[j][1]) === runId) {
+        var ir = issueRows[j];
+        issues.push({
+          itemCode: String(ir[2]),
+          itemName: String(ir[3]),
+          unit: String(ir[4]),
+          bomQuantity: Number(ir[5]) || 0,
+          actualQuantity: Number(ir[6]) || 0,
+          varianceQuantity: Number(ir[7]) || 0,
+          weightPerPiece: Number(ir[8]) || 0,
+          rate: Number(ir[9]) || 0,
+          remarks: String(ir[10] || '')
+        });
+      }
+    }
+
+    var receipts = [];
+    var receiptRows = receiptSheet.getDataRange().getValues();
+    for (var k = 1; k < receiptRows.length; k++) {
+      if (String(receiptRows[k][1]) === runId) {
+        var rr = receiptRows[k];
+        receipts.push({
+          itemCode: String(rr[2]),
+          itemName: String(rr[3]),
+          unit: String(rr[4]),
+          bomQuantity: Number(rr[5]) || 0,
+          actualQuantity: Number(rr[6]) || 0,
+          varianceQuantity: Number(rr[7]) || 0,
+          remarks: String(rr[8] || '')
+        });
+      }
+    }
+
+    return {
+      run: run,
+      issues: issues,
+      receipts: receipts
+    };
+  } catch (err) {
+    throw new Error('Error getting run details: ' + err.message);
+  }
+}
+
+function deleteRowsByMatchingColumn(sheet, colIndex, targetValue) {
+  var lastRow = sheet.getLastRow();
+  if (lastRow <= 1) return;
+
+  var values = sheet.getRange(1, colIndex, lastRow, 1).getValues();
+  for (var i = lastRow - 1; i >= 1; i--) {
+    if (String(values[i][0]) === String(targetValue)) {
+      sheet.deleteRow(i + 1);
+    }
+  }
+}
+
+function formatDateString(val) {
+  if (!val) return '';
+  if (val instanceof Date) {
+    return Utilities.formatDate(val, 'GMT+5:45', 'yyyy-MM-dd');
+  }
+  var str = String(val);
+  if (str.length >= 10 && str.charAt(4) === '-' && str.charAt(7) === '-') {
+    return str.substring(0, 10);
+  }
+  return str;
+}
