@@ -15,8 +15,10 @@ import {
 import { ErpRole, GasSimulatorEngine, TestResult } from './gasSimulator';
 import {
   authorizeSheetsScopeDirect,
+  clearAutoSyncConfigured,
   getGoogleAuthState,
   GoogleAuthState,
+  markAutoSyncConfigured,
   signInWithGoogleSheets,
   signOutGoogleSheets,
   subscribeGoogleAuth,
@@ -165,6 +167,7 @@ export default function App() {
   const pushTimerRef = useRef<number | null>(null);
   const pendingScopeRef = useRef<'OPERATIONS' | 'PROCUREMENT' | 'BOTH' | null>(null);
   const syncInFlightRef = useRef<boolean>(false);
+  const initialRestoredSyncDoneRef = useRef<boolean>(false);
 
   useEffect(() => {
     autoSyncConfirmedRef.current = sheetsAutoSyncConfirmed;
@@ -176,8 +179,21 @@ export default function App() {
       hasTokenRef.current = st.hasAccessToken;
       if (!st.hasAccessToken) {
         setSheetsAutoSyncConfirmed(false);
-      } else if (!st.error) {
-        setSheetsSyncError('');
+        autoSyncConfirmedRef.current = false;
+      } else {
+        if (!st.error) {
+          setSheetsSyncError('');
+        }
+        if (st.autoSyncConfigured && !autoSyncConfirmedRef.current) {
+          setSheetsAutoSyncConfirmed(true);
+          autoSyncConfirmedRef.current = true;
+          if (!initialRestoredSyncDoneRef.current) {
+            initialRestoredSyncDoneRef.current = true;
+            window.setTimeout(() => {
+              void runBidirectionalSync({ pushAfterPull: false });
+            }, 50);
+          }
+        }
       }
       if (st.error) {
         setSheetsSyncError(st.error);
@@ -499,13 +515,23 @@ export default function App() {
   const handleConnectGoogleSheets = async () => {
     setSheetsSyncError('');
     try {
-      if (googleAuth.needsScopeGrant || googleAuth.isSignedIn) {
-        await authorizeSheetsScopeDirect();
+      const nextState =
+        googleAuth.needsScopeGrant || googleAuth.isSignedIn || googleAuth.autoSyncConfigured
+          ? await authorizeSheetsScopeDirect()
+          : await signInWithGoogleSheets();
+
+      if (nextState.autoSyncConfigured) {
+        setSheetsAutoSyncConfirmed(true);
+        autoSyncConfirmedRef.current = true;
+        initialRestoredSyncDoneRef.current = true;
+        await runBidirectionalSync({
+          pushAfterPull: false,
+          initialLink: true,
+        });
       } else {
-        await signInWithGoogleSheets();
+        setPendingSyncAction('enable_auto');
+        setShowSyncConfirmModal(true);
       }
-      setPendingSyncAction('enable_auto');
-      setShowSyncConfirmModal(true);
     } catch (err: any) {
       setSheetsSyncError(err?.message || 'Google sign-in failed.');
     }
@@ -513,8 +539,10 @@ export default function App() {
 
   const handleConfirmSheetsSync = async () => {
     setShowSyncConfirmModal(false);
+    markAutoSyncConfigured(googleAuth.email);
     setSheetsAutoSyncConfirmed(true);
     autoSyncConfirmedRef.current = true;
+    initialRestoredSyncDoneRef.current = true;
     await runBidirectionalSync({
       pushAfterPull: pendingSyncAction === 'full_push',
       initialLink: true,
@@ -525,9 +553,10 @@ export default function App() {
     <div className="inline-flex items-center gap-1.5 shrink-0">
       <button
         type="button"
+        disabled={googleAuth.isRestoringSession}
         onClick={handleConnectGoogleSheets}
-        className={`px-3 py-1 rounded-md text-xs font-medium inline-flex items-center gap-2 shadow-xs transition-colors whitespace-nowrap shrink-0 ${
-          googleAuth.needsScopeGrant
+        className={`px-3 py-1 rounded-md text-xs font-medium inline-flex items-center gap-2 shadow-xs transition-colors whitespace-nowrap shrink-0 disabled:opacity-60 ${
+          googleAuth.autoSyncConfigured || googleAuth.needsScopeGrant
             ? 'bg-amber-400 hover:bg-amber-300 text-slate-950 font-semibold border border-amber-300'
             : 'bg-white hover:bg-slate-50 text-slate-800 border border-slate-300'
         }`}
@@ -539,24 +568,31 @@ export default function App() {
           <path fill="#EA4335" d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.31 0 3.26 2.7 1.29 6.62l3.99 3.14c.95-2.85 3.6-4.96 6.72-4.96Z" />
         </svg>
         <span>
-          {googleAuth.needsScopeGrant
+          {googleAuth.isRestoringSession
+            ? 'Restoring Auto-Sync...'
+            : googleAuth.autoSyncConfigured
+            ? 'Resume Auto-Sync'
+            : googleAuth.needsScopeGrant
             ? 'Authorize Google Sheets'
             : googleAuth.isSignedIn
             ? 'Reconnect Google Sheets'
             : 'Sign in with Google'}
         </span>
       </button>
-      {googleAuth.isSignedIn && (
+      {(googleAuth.isSignedIn || googleAuth.autoSyncConfigured) && (
         <button
           type="button"
           onClick={() => {
             setSheetsSyncError('');
+            initialRestoredSyncDoneRef.current = false;
+            clearAutoSyncConfigured();
+            setSheetsAutoSyncConfirmed(false);
             signOutGoogleSheets();
           }}
           className="px-2 py-1 text-[11px] text-slate-300 hover:text-white underline whitespace-nowrap"
           title={`Signed in as ${googleAuth.email}`}
         >
-          Switch Account
+          {googleAuth.autoSyncConfigured ? 'Disconnect' : 'Switch Account'}
         </button>
       )}
     </div>
@@ -658,14 +694,22 @@ export default function App() {
           <span className="text-amber-300 truncate max-w-md" title={sheetsSyncError}>
             · {sheetsSyncError}
           </span>
+        ) : googleAuth.isRestoringSession ? (
+          <span className="text-sky-300">
+            · Restoring persistent Google Sheets Auto-Sync ({googleAuth.email || 'saved account'})...
+          </span>
         ) : sheetsAutoSyncConfirmed && googleAuth.hasAccessToken ? (
           <span className="text-emerald-300 tabular-nums">
             · {syncBusy ? 'Syncing both Google Sheets...' : `Live 2-Way Active${lastSheetsSyncAt ? ` (${lastSheetsSyncAt})` : ''}`}
             {sheetsSyncNote ? ` · ${sheetsSyncNote}` : ''}
           </span>
+        ) : googleAuth.autoSyncConfigured ? (
+          <span className="text-amber-200">
+            · Auto-Sync saved for {googleAuth.email || 'Google Account'} — click &quot;Resume Auto-Sync&quot; to activate
+          </span>
         ) : (
           <span className="text-amber-200">
-            · Not connected — click{' '}
+            · Not connected — one-time setup: click{' '}
             {googleAuth.needsScopeGrant
               ? '"Authorize Google Sheets" and tick the Google Sheets checkbox'
               : googleAuth.isSignedIn
@@ -716,6 +760,8 @@ export default function App() {
             <button
               type="button"
               onClick={() => {
+                initialRestoredSyncDoneRef.current = false;
+                clearAutoSyncConfigured();
                 setSheetsAutoSyncConfirmed(false);
                 signOutGoogleSheets();
               }}

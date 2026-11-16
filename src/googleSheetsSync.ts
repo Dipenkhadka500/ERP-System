@@ -1,4 +1,9 @@
-import { clearSheetsAccessToken, getSheetsAccessToken } from './googleAuth';
+import {
+  clearSheetsAccessToken,
+  ensureValidSheetsAccessToken,
+  getSheetsAccessToken,
+  refreshSheetsTokenSilently,
+} from './googleAuth';
 import type { GasSimulatorEngine } from './gasSimulator';
 
 export const OPERATIONS_SPREADSHEET_ID = '1gGmpt4gKEE4Nu42960A8cmdrXaTpT-IKHW5oTAWGAJs';
@@ -99,15 +104,19 @@ function saveHashes(hashes: Record<string, string>) {
   }
 }
 
-function requireToken(): string {
-  const token = getSheetsAccessToken();
-  if (!token) {
-    throw new Error('Google Sheets connection is not active. Click "Sign in with Google" first.');
+async function requireTokenAsync(): Promise<string> {
+  const existing = getSheetsAccessToken();
+  if (existing) {
+    const valid = await ensureValidSheetsAccessToken();
+    if (valid) return valid;
+  } else {
+    const valid = await ensureValidSheetsAccessToken();
+    if (valid) return valid;
   }
-  return token;
+  throw new Error('Google Sheets connection is not active. Click "Sign in with Google" or "Resume Auto-Sync" first.');
 }
 
-async function sheetsApiFetch<T>(url: string, token: string, init?: RequestInit): Promise<T> {
+async function sheetsApiFetch<T>(url: string, token: string, init?: RequestInit, allow401Retry = true): Promise<T> {
   const res = await fetch(url, {
     ...init,
     headers: {
@@ -116,6 +125,13 @@ async function sheetsApiFetch<T>(url: string, token: string, init?: RequestInit)
       ...(init?.headers || {}),
     },
   });
+
+  if (res.status === 401 && allow401Retry) {
+    const refreshed = await refreshSheetsTokenSilently();
+    if (refreshed) {
+      return sheetsApiFetch<T>(url, refreshed, init, false);
+    }
+  }
 
   if (res.status === 401 || res.status === 403) {
     let detail = '';
@@ -130,7 +146,7 @@ async function sheetsApiFetch<T>(url: string, token: string, init?: RequestInit)
     const isScopeError =
       /insufficient|scope/i.test(detail) || /ACCESS_TOKEN_SCOPE_INSUFFICIENT/i.test(reason);
     if (res.status === 401) {
-      clearSheetsAccessToken('Google session expired. Please reconnect Google Sheets.');
+      clearSheetsAccessToken('Google session expired. Click "Resume Auto-Sync" to continue.', true);
     } else if (isScopeError) {
       clearSheetsAccessToken(
         'Google Sheets permission was not granted. Click "Authorize Google Sheets" and check the Google Sheets permission box.',
@@ -321,7 +337,7 @@ export async function syncBidirectionalWithGoogleSheets(
   engine: GasSimulatorEngine,
   options: { pushAfterPull?: boolean; initialLink?: boolean } = {}
 ): Promise<SheetSyncSummary> {
-  const token = requireToken();
+  const token = await requireTokenAsync();
   const prevVersion = engine.getDbSnapshot().version;
 
   const [opsMeta, procMeta] = await Promise.all([
@@ -388,7 +404,7 @@ export async function pushErpChangesToGoogleSheets(
   engine: GasSimulatorEngine,
   scope: 'OPERATIONS' | 'PROCUREMENT' | 'BOTH'
 ): Promise<{ pushedOpsTabs: number; pushedProcTabs: number; syncedAt: string }> {
-  const token = requireToken();
+  const token = await requireTokenAsync();
   const payload = engine.exportGoogleSheetsPayloads();
   let pushedOpsTabs = 0;
   let pushedProcTabs = 0;
