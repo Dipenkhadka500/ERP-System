@@ -147,6 +147,8 @@ var dipenSheetsConsole = {
       box.innerHTML =
         '<strong>Google Sheets Credentials:</strong> ' +
         (d.googleSheetsConfigured ? '<span class="status-ok">Configured (Service Account)</span>' : '<span class="status-warn">Not Configured (Set DIPEN_GOOGLE_CREDENTIALS_PATH)</span>') +
+        ' · <strong>Auto-Sync:</strong> ' +
+        (d.googleSheetsConfigured && d.autoSyncEnabled ? '<span class="status-ok">Active (Push on Save + 30s Pull)</span>' : '<span class="status-muted">Waiting for Credentials</span>') +
         ' · <strong>Operations Sheet ID:</strong> <span class="font-mono">' + escapeHtml(d.operationsSpreadsheetId || '-') + '</span>' +
         ' · <strong>Procurement Sheet ID:</strong> <span class="font-mono">' + escapeHtml(d.procurementSpreadsheetId || '-') + '</span>';
 
@@ -242,6 +244,17 @@ var dipenSheetsConsole = {
     });
   },
 
+  syncAllNow: function () {
+    dipenRestFetch('/api/sheets/sync-all', { method: 'POST', body: '{}' }).then(function (res) {
+      var d = res.data || {};
+      showToast('Two-Way Google Sheets Sync complete (Created: ' + (d.created || 0) + ', Updated: ' + (d.updated || 0) + ').', 'success');
+      if (typeof refreshItemsCache === 'function') refreshItemsCache();
+      dipenSheetsConsole.loadOverview();
+    }).catch(function (err) {
+      showToast(err.message, 'error');
+    });
+  },
+
   runBackup: function () {
     dipenRestFetch('/api/admin/backups/run', { method: 'POST', body: '{}' }).then(function (res) {
       showToast(res.message || 'MySQL backup finished.', 'success');
@@ -270,6 +283,7 @@ var dipenSheetsConsole = {
       '      <button class="btn btn-sm btn-outline-primary" onclick="dipenSheetsConsole.previewImport()"><i class="fa-solid fa-eye me-1"></i>Preview Import</button>' +
       (isAdmin ? '<button id="dsCommitImportBtn" class="btn btn-sm btn-primary" onclick="dipenSheetsConsole.commitImport()"><i class="fa-solid fa-download me-1"></i>Commit to MySQL</button>' : '') +
       '      <button class="btn btn-sm btn-outline-success" onclick="dipenSheetsConsole.exportToSheet()"><i class="fa-solid fa-upload me-1"></i>Push MySQL to Sheet</button>' +
+      (isAdmin ? '<button class="btn btn-sm btn-success" onclick="dipenSheetsConsole.syncAllNow()"><i class="fa-solid fa-arrows-rotate me-1"></i>Full 2-Way Sync Now</button>' : '') +
       '    </div>' +
       '  </div>' +
       '  <div id="dsSheetsStatusBanner" class="alert alert-light border small mb-2">Loading Google Sheets connector status...</div>' +

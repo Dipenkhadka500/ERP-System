@@ -115,42 +115,46 @@ public class RpcBridgeController {
       }
       case "addItem" -> {
         Map<String, Object> saved = itemService.addItem(argMap(args, 0));
+        sheetsSyncService.pushScopeAsync("OPERATIONS");
         yield ApiResponse.ok("Item " + saved.get("itemCode") + " added.", saved, versionService.getCurrentVersion());
       }
       case "updateItem" -> {
         Map<String, Object> saved = itemService.updateItem(argMap(args, 0));
+        sheetsSyncService.pushScopeAsync("OPERATIONS");
         yield ApiResponse.ok("Item " + saved.get("itemCode") + " updated.", saved, versionService.getCurrentVersion());
       }
       case "setItemStatus" -> {
         Map<String, Object> res = itemService.setItemStatus(argStr(args, 0), argStr(args, 1));
+        sheetsSyncService.pushScopeAsync("OPERATIONS");
         yield ApiResponse.ok("Item status updated to " + res.get("status") + ".", res, versionService.getCurrentVersion());
       }
       case "deleteItem" -> {
         Map<String, Object> res = itemService.deleteItem(argStr(args, 0));
+        sheetsSyncService.pushScopeAsync("OPERATIONS");
         yield ApiResponse.ok("Item " + res.get("itemCode") + " deleted.", res, versionService.getCurrentVersion());
       }
 
       /* ---------------- TRANSACTIONS ---------------- */
-      case "saveProduction" -> ApiResponse.ok(
-          "Production entry saved.",
-          txService.createTransaction("PRODUCTION", argMap(args, 0), "PRODUCTION_WRITE"),
-          versionService.getCurrentVersion()
-      );
-      case "saveDispatch" -> ApiResponse.ok(
-          "Dispatch entry saved.",
-          txService.createTransaction("DISPATCH", argMap(args, 0), "DISPATCH_WRITE"),
-          versionService.getCurrentVersion()
-      );
-      case "saveGoodsReceipt" -> ApiResponse.ok(
-          "Goods Receipt entry saved.",
-          txService.createTransaction("GOODS_RECEIPT", argMap(args, 0), "RECEIPT_WRITE"),
-          versionService.getCurrentVersion()
-      );
-      case "saveIssue" -> ApiResponse.ok(
-          "Material Issue entry saved.",
-          txService.createTransaction("ISSUE", argMap(args, 0), "ISSUE_WRITE"),
-          versionService.getCurrentVersion()
-      );
+      case "saveProduction" -> {
+        Map<String, Object> saved = txService.createTransaction("PRODUCTION", argMap(args, 0), "PRODUCTION_WRITE");
+        sheetsSyncService.pushScopeAsync("OPERATIONS");
+        yield ApiResponse.ok("Production entry saved.", saved, versionService.getCurrentVersion());
+      }
+      case "saveDispatch" -> {
+        Map<String, Object> saved = txService.createTransaction("DISPATCH", argMap(args, 0), "DISPATCH_WRITE");
+        sheetsSyncService.pushScopeAsync("OPERATIONS");
+        yield ApiResponse.ok("Dispatch entry saved.", saved, versionService.getCurrentVersion());
+      }
+      case "saveGoodsReceipt" -> {
+        Map<String, Object> saved = txService.createTransaction("GOODS_RECEIPT", argMap(args, 0), "RECEIPT_WRITE");
+        sheetsSyncService.pushScopeAsync("BOTH");
+        yield ApiResponse.ok("Goods Receipt entry saved.", saved, versionService.getCurrentVersion());
+      }
+      case "saveIssue" -> {
+        Map<String, Object> saved = txService.createTransaction("ISSUE", argMap(args, 0), "ISSUE_WRITE");
+        sheetsSyncService.pushScopeAsync("OPERATIONS");
+        yield ApiResponse.ok("Material Issue entry saved.", saved, versionService.getCurrentVersion());
+      }
       case "getProductionRecords" -> {
         Map<String, Object> f = new LinkedHashMap<>(argMap(args, 0));
         f.put("txType", "PRODUCTION");
@@ -176,16 +180,16 @@ public class RpcBridgeController {
           txService.getTransactionById(argStr(args, 0)),
           ver
       );
-      case "updateTransaction" -> ApiResponse.ok(
-          "Transaction updated.",
-          txService.updateTransaction(argStr(args, 0), argMap(args, 1)),
-          versionService.getCurrentVersion()
-      );
-      case "cancelTransaction" -> ApiResponse.ok(
-          "Transaction cancelled.",
-          txService.cancelTransaction(argStr(args, 0), argStr(args, 1)),
-          versionService.getCurrentVersion()
-      );
+      case "updateTransaction" -> {
+        Map<String, Object> updated = txService.updateTransaction(argStr(args, 0), argMap(args, 1));
+        sheetsSyncService.pushScopeAsync("OPERATIONS");
+        yield ApiResponse.ok("Transaction updated.", updated, versionService.getCurrentVersion());
+      }
+      case "cancelTransaction" -> {
+        Map<String, Object> cancelled = txService.cancelTransaction(argStr(args, 0), argStr(args, 1));
+        sheetsSyncService.pushScopeAsync("OPERATIONS");
+        yield ApiResponse.ok("Transaction cancelled.", cancelled, versionService.getCurrentVersion());
+      }
 
       /* ---------------- STOCK REGISTERS & REPORTS ---------------- */
       case "getFinishedGoodsStock" -> ApiResponse.ok(
@@ -241,10 +245,15 @@ public class RpcBridgeController {
       case "getDatabaseHealth" -> ApiResponse.ok("Database health report generated.", stockReportService.getDatabaseHealthLegacy(), ver);
       case "syncWorkingSheets" -> {
         permissionChecker.assertPermission("SYNC_ADMIN");
+        Map<String, Object> overview = sheetsSyncService.getSyncOverview();
+        if (Boolean.TRUE.equals(overview.get("googleSheetsConfigured"))) {
+          Map<String, Object> syncRes = sheetsSyncService.syncAllBidirectionalNow();
+          yield ApiResponse.ok("Two-way Google Sheets sync completed.", syncRes, versionService.getCurrentVersion());
+        }
         long nextVer = versionService.bumpVersion();
         yield ApiResponse.ok(
-            "Use the Google Sheets Bi-Directional Sync panel to preview/import sheet rows or export MySQL DIPEN_ERP snapshots.",
-            Map.of("overview", sheetsSyncService.getSyncOverview()),
+            "MySQL DIPEN_ERP synced. Set DIPEN_GOOGLE_CREDENTIALS_PATH to enable live Google Sheets auto-sync.",
+            Map.of("overview", overview),
             nextVer
         );
       }
@@ -301,6 +310,7 @@ public class RpcBridgeController {
       case "procSaveRecord" -> {
         String sheetName = argStr(args, 0);
         Map<String, Object> res = procurementService.saveRecord(sheetName, argMap(args, 1));
+        sheetsSyncService.pushScopeAsync("PROCUREMENT");
         yield ApiResponse.ok(
             "Record " + res.get("id") + " saved successfully in " + sheetName + ".",
             res,
@@ -310,14 +320,17 @@ public class RpcBridgeController {
       case "procDeleteRecord" -> {
         String sheetName = argStr(args, 0);
         String recordId = argStr(args, 1);
+        Map<String, Object> del = procurementService.deleteRecord(sheetName, recordId);
+        sheetsSyncService.pushScopeAsync("PROCUREMENT");
         yield ApiResponse.ok(
             "Record " + recordId + " deleted.",
-            procurementService.deleteRecord(sheetName, recordId),
+            del,
             versionService.getCurrentVersion()
         );
       }
       case "procSetApproval" -> {
         String msg = procurementService.setApproval(argStr(args, 0), argStr(args, 1), argStr(args, 2), argStr(args, 3));
+        sheetsSyncService.pushScopeAsync("PROCUREMENT");
         yield ApiResponse.ok(msg, Map.of(), versionService.getCurrentVersion());
       }
       case "procGetExchangeRateByDate" -> {
@@ -331,6 +344,7 @@ public class RpcBridgeController {
       }
       case "procSaveExchangeRates" -> {
         Map<String, Object> res = fxService.saveExchangeRates(argMap(args, 0));
+        sheetsSyncService.pushScopeAsync("BOTH");
         yield ApiResponse.ok(
             "Date-wise exchange rates saved for " + res.get("rateDate") + ".",
             res,

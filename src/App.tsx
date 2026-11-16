@@ -13,6 +13,20 @@ import {
   ShieldCheck,
 } from 'lucide-react';
 import { ErpRole, GasSimulatorEngine, TestResult } from './gasSimulator';
+import {
+  authorizeSheetsScopeDirect,
+  getGoogleAuthState,
+  GoogleAuthState,
+  signInWithGoogleSheets,
+  signOutGoogleSheets,
+  subscribeGoogleAuth,
+} from './googleAuth';
+import {
+  OPERATIONS_SPREADSHEET_ID,
+  PROCUREMENT_SPREADSHEET_ID,
+  pushErpChangesToGoogleSheets,
+  syncBidirectionalWithGoogleSheets,
+} from './googleSheetsSync';
 
 type StudioTab = 'preview' | 'codejs' | 'indexhtml' | 'setup';
 
@@ -71,6 +85,33 @@ function buildBridgedIndexHtml(rawHtml: string): string {
       run: makeRunner(null, null)
     }
   };
+  window.addEventListener('message', function(ev) {
+    try {
+      if (ev && ev.data && ev.data.type === 'BIRAT_SHEETS_SYNCED') {
+        if (typeof APP !== 'undefined') {
+          APP.dataVersion = ev.data.version || APP.dataVersion;
+        }
+        if (typeof refreshItemsCache === 'function' && typeof renderCurrentView === 'function') {
+          refreshItemsCache().then(function() {
+            renderCurrentView(true);
+          }).catch(function() {});
+        }
+      }
+    } catch (e) {}
+  });
+  window.addEventListener('DOMContentLoaded', function() {
+    try {
+      if (typeof window.manualRefresh === 'function') {
+        var origManualRefresh = window.manualRefresh;
+        window.manualRefresh = function() {
+          try {
+            window.parent.postMessage({ type: 'BIRAT_REQUEST_SHEETS_SYNC' }, '*');
+          } catch (e) {}
+          return origManualRefresh.apply(this, arguments);
+        };
+      }
+    } catch (e) {}
+  });
 })();
 </script>`;
   return rawHtml.replace('<head>', `<head>${bridgeScript}`);
@@ -108,38 +149,197 @@ export default function App() {
 
   const [simTick, setSimTick] = useState(0);
 
+  // Google Sheets Live Bidirectional Sync State
+  const [googleAuth, setGoogleAuth] = useState<GoogleAuthState>(() => getGoogleAuthState());
+  const [sheetsAutoSyncConfirmed, setSheetsAutoSyncConfirmed] = useState<boolean>(false);
+  const [showSyncConfirmModal, setShowSyncConfirmModal] = useState<boolean>(false);
+  const [pendingSyncAction, setPendingSyncAction] = useState<'enable_auto' | 'full_push'>('enable_auto');
+  const [syncBusy, setSyncBusy] = useState<boolean>(false);
+  const [lastSheetsSyncAt, setLastSheetsSyncAt] = useState<string>('');
+  const [sheetsSyncNote, setSheetsSyncNote] = useState<string>('');
+  const [sheetsSyncError, setSheetsSyncError] = useState<string>('');
+
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const autoSyncConfirmedRef = useRef<boolean>(false);
+  const hasTokenRef = useRef<boolean>(false);
+  const pushTimerRef = useRef<number | null>(null);
+  const pendingScopeRef = useRef<'OPERATIONS' | 'PROCUREMENT' | 'BOTH' | null>(null);
+  const syncInFlightRef = useRef<boolean>(false);
+
   useEffect(() => {
+    autoSyncConfirmedRef.current = sheetsAutoSyncConfirmed;
+  }, [sheetsAutoSyncConfirmed]);
+
+  useEffect(() => {
+    const unsub = subscribeGoogleAuth((st) => {
+      setGoogleAuth(st);
+      hasTokenRef.current = st.hasAccessToken;
+      if (!st.hasAccessToken) {
+        setSheetsAutoSyncConfirmed(false);
+      } else if (!st.error) {
+        setSheetsSyncError('');
+      }
+      if (st.error) {
+        setSheetsSyncError(st.error);
+      }
+    });
+    return unsub;
+  }, []);
+
+  const notifyIframeSynced = () => {
+    try {
+      const ver = simRef.current?.getDbSnapshot().version || 1;
+      iframeRef.current?.contentWindow?.postMessage({ type: 'BIRAT_SHEETS_SYNCED', version: ver }, '*');
+    } catch {}
+  };
+
+  const runBidirectionalSync = async (opts: { pushAfterPull?: boolean; initialLink?: boolean; manual?: boolean } = {}) => {
+    if (!simRef.current || !hasTokenRef.current || syncInFlightRef.current) return;
+    syncInFlightRef.current = true;
+    setSyncBusy(true);
+    setSheetsSyncError('');
+    try {
+      // Flush any pending local ERP push before pulling from Google Sheets
+      if (pushTimerRef.current) {
+        window.clearTimeout(pushTimerRef.current);
+        pushTimerRef.current = null;
+        const pendingScope = pendingScopeRef.current;
+        pendingScopeRef.current = null;
+        if (pendingScope) {
+          await pushErpChangesToGoogleSheets(simRef.current, pendingScope);
+        }
+      }
+
+      const summary = await syncBidirectionalWithGoogleSheets(simRef.current, opts);
+      setLastSheetsSyncAt(summary.syncedAt);
+      const parts: string[] = [];
+      if (summary.importedCreated > 0 || summary.importedUpdated > 0 || summary.importedDeleted > 0) {
+        const counts = [
+          summary.importedCreated > 0 ? `+${summary.importedCreated} new` : '',
+          summary.importedUpdated > 0 ? `${summary.importedUpdated} updated` : '',
+          summary.importedDeleted > 0 ? `${summary.importedDeleted} deleted` : '',
+        ].filter(Boolean);
+        parts.push(`Pulled ${counts.join(', ')} from Sheets`);
+      }
+      if (summary.pushedOpsTabs > 0 || summary.pushedProcTabs > 0) {
+        parts.push(`Updated ${summary.pushedOpsTabs + summary.pushedProcTabs} sheet tabs`);
+      }
+      setSheetsSyncNote(parts.length > 0 ? parts.join(' · ') : 'Operations & Procurement sheets in sync');
+      if (summary.errors.length > 0) {
+        setSheetsSyncError(`${summary.errors.length} sync issue(s): ${summary.errors[0]}`);
+      }
+      if (summary.versionChanged || summary.importedCreated > 0 || summary.importedUpdated > 0 || summary.importedDeleted > 0 || opts.manual) {
+        setSimTick((t) => t + 1);
+        notifyIframeSynced();
+      }
+    } catch (err: any) {
+      setSheetsSyncError(err?.message || 'Google Sheets sync failed.');
+    } finally {
+      syncInFlightRef.current = false;
+      setSyncBusy(false);
+    }
+  };
+
+  const scheduleAutoPush = (scope: 'OPERATIONS' | 'PROCUREMENT' | 'BOTH') => {
+    if (!autoSyncConfirmedRef.current || !hasTokenRef.current || !simRef.current) return;
+    const prev = pendingScopeRef.current;
+    pendingScopeRef.current = !prev ? scope : prev === scope ? scope : 'BOTH';
+    if (pushTimerRef.current) {
+      window.clearTimeout(pushTimerRef.current);
+    }
+    pushTimerRef.current = window.setTimeout(async () => {
+      const targetScope = pendingScopeRef.current || scope;
+      pendingScopeRef.current = null;
+      pushTimerRef.current = null;
+      if (!simRef.current || !autoSyncConfirmedRef.current || !hasTokenRef.current) return;
+      if (syncInFlightRef.current) {
+        scheduleAutoPush(targetScope);
+        return;
+      }
+      syncInFlightRef.current = true;
+      setSyncBusy(true);
+      setSheetsSyncError('');
+      try {
+        const res = await pushErpChangesToGoogleSheets(simRef.current, targetScope);
+        setLastSheetsSyncAt(res.syncedAt);
+        setSheetsSyncNote(`Auto-saved to Google Sheets (${targetScope})`);
+      } catch (err: any) {
+        setSheetsSyncError(err?.message || 'Auto-push to Google Sheets failed.');
+      } finally {
+        syncInFlightRef.current = false;
+        setSyncBusy(false);
+      }
+    }, 350);
+  };
+
+  useEffect(() => {
+    if (!sheetsAutoSyncConfirmed || !googleAuth.hasAccessToken) return;
+    const intervalId = window.setInterval(() => {
+      runBidirectionalSync({ pushAfterPull: false });
+    }, 10000);
+    const onFocusOrVisible = () => {
+      if (document.visibilityState === 'visible') {
+        runBidirectionalSync({ pushAfterPull: false });
+      }
+    };
+    window.addEventListener('focus', onFocusOrVisible);
+    document.addEventListener('visibilitychange', onFocusOrVisible);
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener('focus', onFocusOrVisible);
+      document.removeEventListener('visibilitychange', onFocusOrVisible);
+    };
+  }, [sheetsAutoSyncConfirmed, googleAuth.hasAccessToken]);
+
+  useEffect(() => {
+    const onMsg = (ev: MessageEvent) => {
+      if (ev?.data?.type === 'BIRAT_REQUEST_SHEETS_SYNC') {
+        if (autoSyncConfirmedRef.current && hasTokenRef.current) {
+          runBidirectionalSync({ pushAfterPull: false, manual: true });
+        }
+      }
+    };
+    window.addEventListener('message', onMsg);
     (window as any).__BIRAT_GAS_DISPATCH__ = (fnName: string, args: any[]) => {
       const res = simRef.current!.invoke(fnName, args);
-      if (
-        res?.success &&
-        [
-          'addItem',
-          'updateItem',
-          'setItemStatus',
-          'deleteItem',
-          'saveProduction',
-          'saveDispatch',
-          'saveGoodsReceipt',
-          'saveIssue',
-          'updateTransaction',
-          'cancelTransaction',
-          'syncWorkingSheets',
-          'reconcileInventory',
-          'submitDailyReport',
-          'procSaveRecord',
-          'procDeleteRecord',
-          'procSetApproval',
-          'procSaveExchangeRates',
-          'procSetupDatabase',
-          'loginUser',
-          'logoutUser',
-        ].includes(fnName)
-      ) {
+      const opsMutations = [
+        'addItem',
+        'updateItem',
+        'setItemStatus',
+        'deleteItem',
+        'saveProduction',
+        'saveDispatch',
+        'saveIssue',
+        'updateTransaction',
+        'cancelTransaction',
+        'submitDailyReport',
+      ];
+      const procMutations = [
+        'procSaveRecord',
+        'procDeleteRecord',
+        'procSetApproval',
+        'procSetupDatabase',
+      ];
+      const bothMutations = ['saveGoodsReceipt', 'procSaveExchangeRates'];
+      const bidirectionalTriggers = ['syncWorkingSheets', 'reconcileInventory'];
+
+      if (res?.success && [...opsMutations, ...procMutations, ...bothMutations, ...bidirectionalTriggers, 'loginUser', 'logoutUser'].includes(fnName)) {
         if (fnName === 'loginUser' || fnName === 'logoutUser') {
           setRole(simRef.current!.getDbSnapshot().activeRole);
         }
         setSimTick((t) => t + 1);
+
+        if (bidirectionalTriggers.includes(fnName)) {
+          if (autoSyncConfirmedRef.current && hasTokenRef.current) {
+            setTimeout(() => runBidirectionalSync({ pushAfterPull: false, manual: true }), 50);
+          }
+        } else if (bothMutations.includes(fnName)) {
+          scheduleAutoPush('BOTH');
+        } else if (opsMutations.includes(fnName)) {
+          scheduleAutoPush('OPERATIONS');
+        } else if (procMutations.includes(fnName)) {
+          scheduleAutoPush('PROCUREMENT');
+        }
       }
       return res;
     };
@@ -178,9 +378,11 @@ export default function App() {
       }
     };
     return () => {
+      window.removeEventListener('message', onMsg);
       delete (window as any).__BIRAT_GAS_DISPATCH__;
       delete (window as any).__BIRAT_DOWNLOAD_BYTES__;
       delete (window as any).__BIRAT_OPEN_HTML__;
+      if (pushTimerRef.current) window.clearTimeout(pushTimerRef.current);
     };
   }, []);
 
@@ -294,27 +496,266 @@ export default function App() {
     }
   }, []);
 
+  const handleConnectGoogleSheets = async () => {
+    setSheetsSyncError('');
+    try {
+      if (googleAuth.needsScopeGrant || googleAuth.isSignedIn) {
+        await authorizeSheetsScopeDirect();
+      } else {
+        await signInWithGoogleSheets();
+      }
+      setPendingSyncAction('enable_auto');
+      setShowSyncConfirmModal(true);
+    } catch (err: any) {
+      setSheetsSyncError(err?.message || 'Google sign-in failed.');
+    }
+  };
+
+  const handleConfirmSheetsSync = async () => {
+    setShowSyncConfirmModal(false);
+    setSheetsAutoSyncConfirmed(true);
+    autoSyncConfirmedRef.current = true;
+    await runBidirectionalSync({
+      pushAfterPull: pendingSyncAction === 'full_push',
+      initialLink: true,
+    });
+  };
+
+  const renderGoogleSignInButton = () => (
+    <div className="inline-flex items-center gap-1.5 shrink-0">
+      <button
+        type="button"
+        onClick={handleConnectGoogleSheets}
+        className={`px-3 py-1 rounded-md text-xs font-medium inline-flex items-center gap-2 shadow-xs transition-colors whitespace-nowrap shrink-0 ${
+          googleAuth.needsScopeGrant
+            ? 'bg-amber-400 hover:bg-amber-300 text-slate-950 font-semibold border border-amber-300'
+            : 'bg-white hover:bg-slate-50 text-slate-800 border border-slate-300'
+        }`}
+      >
+        <svg className="w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24" aria-hidden="true">
+          <path fill="#4285F4" d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17Z" />
+          <path fill="#34A853" d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.11-6.72-4.96H1.29v3.14C3.26 21.3 7.31 24 12 24Z" />
+          <path fill="#FBBC05" d="M5.28 14.24c-.24-.72-.38-1.49-.38-2.24s.14-1.52.38-2.24V6.62H1.29C.47 8.24 0 10.06 0 12s.47 3.76 1.29 5.38l3.99-3.14Z" />
+          <path fill="#EA4335" d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.31 0 3.26 2.7 1.29 6.62l3.99 3.14c.95-2.85 3.6-4.96 6.72-4.96Z" />
+        </svg>
+        <span>
+          {googleAuth.needsScopeGrant
+            ? 'Authorize Google Sheets'
+            : googleAuth.isSignedIn
+            ? 'Reconnect Google Sheets'
+            : 'Sign in with Google'}
+        </span>
+      </button>
+      {googleAuth.isSignedIn && (
+        <button
+          type="button"
+          onClick={() => {
+            setSheetsSyncError('');
+            signOutGoogleSheets();
+          }}
+          className="px-2 py-1 text-[11px] text-slate-300 hover:text-white underline whitespace-nowrap"
+          title={`Signed in as ${googleAuth.email}`}
+        >
+          Switch Account
+        </button>
+      )}
+    </div>
+  );
+
+  const renderSyncConfirmModal = () =>
+    showSyncConfirmModal ? (
+      <div className="fixed inset-0 bg-slate-950/60 z-50 flex items-center justify-center p-4">
+        <div className="bg-white rounded-xl border border-slate-200 max-w-lg w-full p-6 space-y-4 shadow-xl text-slate-900">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h3 className="text-base font-bold text-slate-900">
+                {pendingSyncAction === 'full_push'
+                  ? 'Confirm Writing ERP Data to Google Sheets'
+                  : 'Confirm Two-Way Google Sheets Auto-Sync'}
+              </h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Signed in as <span className="font-semibold text-slate-700">{googleAuth.email || 'Google Account'}</span>
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowSyncConfirmModal(false)}
+              className="text-xs text-slate-400 hover:text-slate-700"
+            >
+              Close
+            </button>
+          </div>
+
+          <div className="text-xs text-slate-700 space-y-2 leading-relaxed bg-slate-50 border border-slate-200 rounded-lg p-3.5">
+            <p>
+              This action links and enables automatic two-way synchronization with your two Google Spreadsheets:
+            </p>
+            <ul className="list-disc pl-5 space-y-1">
+              <li>
+                <strong>Operations &amp; Inventory Sheet:</strong>{' '}
+                <code className="font-mono text-[11px] bg-white px-1 py-0.5 rounded border">{OPERATIONS_SPREADSHEET_ID}</code>
+              </li>
+              <li>
+                <strong>Procurement &amp; Tender Sheet:</strong>{' '}
+                <code className="font-mono text-[11px] bg-white px-1 py-0.5 rounded border">{PROCUREMENT_SPREADSHEET_ID}</code>
+              </li>
+            </ul>
+            <p className="text-slate-600 pt-1">
+              {pendingSyncAction === 'full_push'
+                ? 'Existing rows will be reconciled and ERP tabs in both spreadsheets will be updated with current ERP records.'
+                : 'New or updated rows entered directly in Google Sheets will automatically update the ERP every 10 seconds, and entries saved in the ERP will automatically write to Google Sheets.'}
+            </p>
+          </div>
+
+          <div className="flex justify-end gap-2 pt-1">
+            <button
+              type="button"
+              onClick={() => setShowSyncConfirmModal(false)}
+              className="px-3 py-1.5 text-xs font-medium bg-slate-100 text-slate-700 rounded-lg hover:bg-slate-200"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={handleConfirmSheetsSync}
+              className="px-4 py-1.5 text-xs font-semibold bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+            >
+              {pendingSyncAction === 'full_push' ? 'Confirm & Update Sheets' : 'Confirm & Enable Auto-Sync'}
+            </button>
+          </div>
+        </div>
+      </div>
+    ) : null;
+
+  const renderGoogleSheetsBar = (compact: boolean) => (
+    <div
+      className={`${
+        compact ? 'h-10 bg-slate-900 text-slate-100 border-b border-slate-800 px-4' : 'bg-slate-800 text-slate-100 border-b border-slate-700 px-6 py-2'
+      } flex items-center justify-between gap-3 text-xs overflow-x-auto`}
+    >
+      <div className="flex items-center gap-2.5 whitespace-nowrap shrink-0">
+        <Sheet className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+        <span className="font-semibold text-white">Google Sheets Auto-Sync</span>
+        <a
+          href={`https://docs.google.com/spreadsheets/d/${OPERATIONS_SPREADSHEET_ID}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-[11px] inline-flex items-center gap-1"
+          title={`Operations Sheet: ${OPERATIONS_SPREADSHEET_ID}`}
+        >
+          Ops Sheet <ExternalLink className="w-2.5 h-2.5" />
+        </a>
+        <a
+          href={`https://docs.google.com/spreadsheets/d/${PROCUREMENT_SPREADSHEET_ID}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-[11px] inline-flex items-center gap-1"
+          title={`Procurement & Tender Sheet: ${PROCUREMENT_SPREADSHEET_ID}`}
+        >
+          Procurement Sheet <ExternalLink className="w-2.5 h-2.5" />
+        </a>
+        {sheetsSyncError ? (
+          <span className="text-amber-300 truncate max-w-md" title={sheetsSyncError}>
+            · {sheetsSyncError}
+          </span>
+        ) : sheetsAutoSyncConfirmed && googleAuth.hasAccessToken ? (
+          <span className="text-emerald-300 tabular-nums">
+            · {syncBusy ? 'Syncing both Google Sheets...' : `Live 2-Way Active${lastSheetsSyncAt ? ` (${lastSheetsSyncAt})` : ''}`}
+            {sheetsSyncNote ? ` · ${sheetsSyncNote}` : ''}
+          </span>
+        ) : (
+          <span className="text-amber-200">
+            · Not connected — click{' '}
+            {googleAuth.needsScopeGrant
+              ? '"Authorize Google Sheets" and tick the Google Sheets checkbox'
+              : googleAuth.isSignedIn
+              ? '"Reconnect Google Sheets"'
+              : '"Sign in with Google"'}{' '}
+            to sync both sheets
+          </span>
+        )}
+      </div>
+
+      <div className="flex items-center gap-2 whitespace-nowrap shrink-0">
+        {!googleAuth.hasAccessToken ? (
+          renderGoogleSignInButton()
+        ) : !sheetsAutoSyncConfirmed ? (
+          <button
+            type="button"
+            onClick={() => {
+              setPendingSyncAction('enable_auto');
+              setShowSyncConfirmModal(true);
+            }}
+            className="px-3 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-md font-semibold text-xs inline-flex items-center gap-1.5"
+          >
+            <RefreshCw className="w-3 h-3" />
+            Enable Two-Way Auto-Sync
+          </button>
+        ) : (
+          <>
+            <button
+              type="button"
+              disabled={syncBusy}
+              onClick={() => runBidirectionalSync({ pushAfterPull: false, manual: true })}
+              className="px-2.5 py-1 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-md font-medium text-xs inline-flex items-center gap-1.5"
+            >
+              <RefreshCw className={`w-3 h-3 ${syncBusy ? 'animate-spin' : ''}`} />
+              Sync Now
+            </button>
+            <button
+              type="button"
+              disabled={syncBusy}
+              onClick={() => {
+                setPendingSyncAction('full_push');
+                setShowSyncConfirmModal(true);
+              }}
+              className="px-2.5 py-1 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-white rounded-md text-xs"
+            >
+              Push All to Sheets
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setSheetsAutoSyncConfirmed(false);
+                signOutGoogleSheets();
+              }}
+              className="px-2 py-1 text-slate-300 hover:text-white text-[11px]"
+              title={googleAuth.email}
+            >
+              Disconnect ({googleAuth.email.split('@')[0]})
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+
   if (directWebAppMode) {
     return (
-      <div className="w-screen h-screen bg-white relative overflow-hidden">
+      <div className="w-screen h-screen bg-white relative overflow-hidden flex flex-col">
+        {renderGoogleSheetsBar(true)}
         {loadError && (
           <div className="m-6 p-4 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
             {loadError}
           </div>
         )}
-        {bridgedSrcDoc ? (
-          <iframe
-            key={iframeKey}
-            title="Birat Healthcare Operations ERP Web App"
-            srcDoc={bridgedSrcDoc}
-            className="w-full h-full border-0 block"
-            sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-downloads allow-popups allow-popups-to-escape-sandbox"
-          />
-        ) : (
-          <div className="h-full flex items-center justify-center text-sm text-slate-500">
-            Loading Birat Healthcare ERP Web App...
-          </div>
-        )}
+        <div className="flex-1 min-h-0">
+          {bridgedSrcDoc ? (
+            <iframe
+              ref={iframeRef}
+              key={iframeKey}
+              title="Birat Healthcare Operations ERP Web App"
+              srcDoc={bridgedSrcDoc}
+              className="w-full h-full border-0 block"
+              sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-downloads allow-popups allow-popups-to-escape-sandbox"
+            />
+          ) : (
+            <div className="h-full flex items-center justify-center text-sm text-slate-500">
+              Loading Birat Healthcare ERP Web App...
+            </div>
+          )}
+        </div>
+        {renderSyncConfirmModal()}
       </div>
     );
   }
@@ -487,14 +928,17 @@ export default function App() {
             </div>
           </div>
 
+          {renderGoogleSheetsBar(false)}
+
           <div className="flex-1 bg-white">
             {bridgedSrcDoc ? (
               <iframe
+                ref={iframeRef}
                 key={iframeKey}
                 title="Birat Healthcare Operations ERP Live Preview"
                 srcDoc={bridgedSrcDoc}
                 className="w-full border-0"
-                style={{ height: 'calc(100vh - 102px)' }}
+                style={{ height: 'calc(100vh - 142px)' }}
                 sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-downloads allow-popups allow-popups-to-escape-sandbox"
               />
             ) : (
@@ -936,6 +1380,7 @@ export default function App() {
           </div>
         </div>
       )}
+      {renderSyncConfirmModal()}
     </div>
   );
 }

@@ -2608,6 +2608,1096 @@ export class GasSimulatorEngine {
   }
 
   /**
+   * Builds 2D matrices for both Operations & Procurement Google Spreadsheets
+   * matching Code.js SCHEMAS & PROCUREMENT_SCHEMAS exactly.
+   */
+  exportGoogleSheetsPayloads(): {
+    operations: Record<string, (string | number)[][]>;
+    procurement: Record<string, (string | number)[][]>;
+    rowHashes: Record<string, string>;
+  } {
+    const itemMap = Object.fromEntries(this.db.items.map((i) => [i.itemCode, i]));
+    const rowHashes: Record<string, string> = {};
+
+    const ledgerBySheet = (sheetName: string) =>
+      this.db.ledger.filter((l) => l.sourceSheet === sheetName);
+
+    const parseMeta = (json: string): Record<string, any> => {
+      try {
+        return JSON.parse(json || '{}') || {};
+      } catch {
+        return {};
+      }
+    };
+
+    // 1. Operations Spreadsheet (1gGmpt4gKEE4Nu42960A8cmdrXaTpT-IKHW5oTAWGAJs)
+    const itemMasterRows: (string | number)[][] = [
+      [
+        'Item Code',
+        'Item Name',
+        'Categories',
+        'Brand Categories',
+        'HSN Code',
+        'Index Unit',
+        'Fraction of Index Unit',
+        'Conversion Quantity',
+        'Conversion Unit',
+        'Reorder Level',
+        'Status',
+        'Created Date',
+        'Updated Date',
+      ],
+    ];
+    for (const it of this.db.items) {
+      const row = [
+        it.itemCode,
+        it.itemName,
+        it.category,
+        it.brand || '',
+        it.hsnCode || '',
+        it.indexUnit,
+        it.fractionOfIndexUnit,
+        it.conversionQty || 0,
+        it.conversionUnit || '',
+        it.reorderLevel || 0,
+        it.status,
+        it.createdDate,
+        it.updatedDate,
+      ];
+      itemMasterRows.push(row);
+      rowHashes[`OPS:Item Master:${it.itemCode}`] = hashParts(row);
+    }
+
+    const buildTxRows = (
+      sheetName: 'Production' | 'Dispatch' | 'Goods Reciept' | 'Issue',
+      headers: string[],
+      mapper: (tx: LedgerRecord, it: ItemRecord | undefined, dual: string, meta: Record<string, any>) => (string | number)[]
+    ) => {
+      const matrix: (string | number)[][] = [headers];
+      const ledgerList = ledgerBySheet(sheetName);
+      const seenIds = new Set<string>();
+      for (const tx of ledgerList) {
+        seenIds.add(tx.txId);
+        const it = itemMap[tx.itemCode];
+        const dual = this.decomposeDualUOM(it, tx.baseQty).display;
+        const meta = parseMeta(tx.metaJson);
+        const row = mapper(tx, it, dual, meta);
+        matrix.push(row);
+        rowHashes[`OPS:${sheetName}:${tx.txId}`] = hashParts(row);
+      }
+      // Include any unsynced working-sheet rows that failed validation
+      for (const wr of this.db.workingSheets[sheetName] || []) {
+        if (wr.txId && seenIds.has(wr.txId)) continue;
+        const it = itemMap[wr.itemCode];
+        const synthetic: LedgerRecord = {
+          txId: wr.txId || '',
+          txType: sheetName === 'Production' ? 'PRODUCTION' : sheetName === 'Dispatch' ? 'DISPATCH' : sheetName === 'Goods Reciept' ? 'GOODS_RECEIPT' : 'ISSUE',
+          txDate: wr.txDate,
+          itemCode: wr.itemCode,
+          itemName: it?.itemName || '',
+          category: it?.category || '',
+          brand: it?.brand || '',
+          enteredQty: wr.quantity,
+          enteredUom: wr.uom,
+          baseQty: wr.quantity,
+          direction: sheetName === 'Production' || sheetName === 'Goods Reciept' ? 'IN' : 'OUT',
+          sourceSheet: sheetName,
+          sourceRow: 0,
+          batchNo: wr.batchNo || '',
+          refNo: wr.refNo || '',
+          partyOrSection: wr.partyOrSection || '',
+          metaJson: '{}',
+          remarks: wr.remarks || '',
+          createdBy: 'Sheet Sync',
+          createdAt: nowIso(),
+          updatedBy: 'Sheet Sync',
+          updatedAt: nowIso(),
+          status: wr.status,
+          recordHash: '',
+        };
+        const row = mapper(synthetic, it, `${wr.quantity} ${wr.uom}`, {});
+        matrix.push(row);
+      }
+      return matrix;
+    };
+
+    const productionRows = buildTxRows(
+      'Production',
+      [
+        'Production ID', 'Production Date', 'Item Category', 'Item Code', 'Item Name', 'Brand',
+        'Quantity', 'UOM', 'Converted Base Qty', 'Index Unit', 'Secondary Display',
+        'Batch/Lot Number', 'Production Reference', 'Remarks', 'Created By', 'Created At',
+        'Status', 'Sync Status', 'Unit Rate', 'Currency', 'Exchange Rate', 'Total NPR',
+      ],
+      (tx, it, dual, meta) => [
+        tx.txId, tx.txDate, tx.category, tx.itemCode, tx.itemName, tx.brand || '',
+        tx.enteredQty, tx.enteredUom, tx.baseQty, it?.indexUnit || tx.enteredUom, dual,
+        tx.batchNo || '', tx.refNo || '', tx.remarks || '', tx.createdBy, tx.createdAt,
+        tx.status, 'SYNCED', Number(meta.unitRate || 0), String(meta.currency || 'NPR'),
+        Number(meta.exchangeRate || 1), Number(meta.totalAmountNPR || 0),
+      ]
+    );
+
+    const dispatchRows = buildTxRows(
+      'Dispatch',
+      [
+        'Dispatch ID', 'Dispatch Date', 'Item Category', 'Item Code', 'Item Name', 'Brand',
+        'Secondary Qty (CTN)', 'Index Qty (Pkt)', 'Dispatch Quantity', 'UOM', 'Converted Base Qty',
+        'Index Unit', 'Secondary Display', 'Customer/Party Name', 'Challan Number', 'Invoice Number',
+        'Vehicle Number', 'Remarks', 'Created By', 'Created At', 'Status', 'Sync Status',
+        'Unit Rate', 'Currency', 'Exchange Rate', 'Total NPR',
+      ],
+      (tx, it, dual, meta) => {
+        const d = this.decomposeDualUOM(it, tx.baseQty);
+        return [
+          tx.txId, tx.txDate, tx.category, tx.itemCode, tx.itemName, tx.brand || '',
+          d.hasSecondary ? d.secondaryQty : 0, d.remainderQty, tx.enteredQty, tx.enteredUom, tx.baseQty,
+          it?.indexUnit || tx.enteredUom, dual, tx.partyOrSection || '', tx.refNo || '',
+          String(meta.invoiceNo || ''), String(meta.vehicleNo || ''), tx.remarks || '',
+          tx.createdBy, tx.createdAt, tx.status, 'SYNCED',
+          Number(meta.unitRate || 0), String(meta.currency || 'NPR'),
+          Number(meta.exchangeRate || 1), Number(meta.totalAmountNPR || 0),
+        ];
+      }
+    );
+
+    const grnRows = buildTxRows(
+      'Goods Reciept',
+      [
+        'Receipt ID', 'Receipt Date', 'Item Category', 'Item Code', 'Item Name', 'Brand',
+        'Received Quantity', 'UOM', 'Converted Base Qty', 'Index Unit', 'Secondary Display',
+        'Supplier Name', 'Invoice Number', 'Purchase Reference', 'Batch/Lot Number', 'Remarks',
+        'Created By', 'Created At', 'Status', 'Sync Status',
+        'PO No', 'Unit Rate', 'Currency', 'Exchange Rate', 'Total NPR',
+      ],
+      (tx, it, dual, meta) => [
+        tx.txId, tx.txDate, tx.category, tx.itemCode, tx.itemName, tx.brand || '',
+        tx.enteredQty, tx.enteredUom, tx.baseQty, it?.indexUnit || tx.enteredUom, dual,
+        tx.partyOrSection || '', String(meta.invoiceNo || ''), tx.refNo || '', tx.batchNo || '',
+        tx.remarks || '', tx.createdBy, tx.createdAt, tx.status, 'SYNCED',
+        String(meta.poNo || ''), Number(meta.unitRate || 0), String(meta.currency || 'NPR'),
+        Number(meta.exchangeRate || 1), Number(meta.totalAmountNPR || 0),
+      ]
+    );
+
+    const issueRows = buildTxRows(
+      'Issue',
+      [
+        'Issue ID', 'Issue Date', 'Item Category', 'Item Code', 'Item Name', 'Brand',
+        'Issue Quantity', 'UOM', 'Converted Base Qty', 'Index Unit', 'Secondary Display',
+        'Department/Production Section', 'Issue Reference', 'Issued To', 'Remarks',
+        'Created By', 'Created At', 'Status', 'Sync Status',
+        'Unit Rate', 'Currency', 'Exchange Rate', 'Total NPR',
+      ],
+      (tx, it, dual, meta) => [
+        tx.txId, tx.txDate, tx.category, tx.itemCode, tx.itemName, tx.brand || '',
+        tx.enteredQty, tx.enteredUom, tx.baseQty, it?.indexUnit || tx.enteredUom, dual,
+        tx.partyOrSection || '', tx.refNo || '', String(meta.issuedTo || ''), tx.remarks || '',
+        tx.createdBy, tx.createdAt, tx.status, 'SYNCED',
+        Number(meta.unitRate || 0), String(meta.currency || 'NPR'),
+        Number(meta.exchangeRate || 1), Number(meta.totalAmountNPR || 0),
+      ]
+    );
+
+    const fgReg = this.buildCategoryRegister('Finished Goods', {});
+    const rmReg = this.buildCategoryRegister('Raw Material', {});
+    const pmReg = this.buildCategoryRegister('Packing Material', {});
+    const allReg = this.buildCategoryRegister(null, {});
+
+    const fgRows: (string | number)[][] = [
+      ['Item Name', 'Item Code', 'Brand', 'Opening Stock', 'Production', 'Dispatch', 'Closing Stock', 'Index Unit', 'Secondary Unit Balance'],
+      ...fgReg.map((r) => [r.itemName, r.itemCode, r.brand || '', r.openingStock, r.stockIn, r.stockOut, r.closingStock, r.indexUnit, r.dualDisplay]),
+    ];
+    const rmRows: (string | number)[][] = [
+      ['Item Name', 'Item Code', 'Brand', 'Opening Stock', 'Receipt', 'Issue', 'Closing Stock', 'Index Unit'],
+      ...rmReg.map((r) => [r.itemName, r.itemCode, r.brand || '', r.openingStock, r.stockIn, r.stockOut, r.closingStock, r.indexUnit]),
+    ];
+    const pmRows: (string | number)[][] = [
+      ['Item Name', 'Item Code', 'Brand', 'Opening Stock', 'Receipt', 'Issue', 'Closing Stock', 'Index Unit', 'Secondary Unit Balance'],
+      ...pmReg.map((r) => [r.itemName, r.itemCode, r.brand || '', r.openingStock, r.stockIn, r.stockOut, r.closingStock, r.indexUnit, r.dualDisplay]),
+    ];
+    const allStockRows: (string | number)[][] = [
+      ['Section', 'Item Name', 'Item Code', 'Brand', 'Category', 'Index Unit', 'Opening Stock', 'Total Stock In', 'Total Stock Out', 'Closing Stock', 'Secondary Unit Balance', 'Reorder Level', 'Stock Status'],
+      ...allReg.map((r) => [
+        r.category === 'Finished Goods' ? 'Finished Goods' : r.category === 'Raw Material' ? 'Raw Material' : r.category === 'Packing Material' ? 'Packing Material' : 'Other Stock',
+        r.itemName, r.itemCode, r.brand || '', r.category, r.indexUnit,
+        r.openingStock, r.stockIn, r.stockOut, r.closingStock, r.dualDisplay, r.reorderLevel, r.stockStatus,
+      ]),
+    ];
+
+    const ledgerRows: (string | number)[][] = [
+      [
+        'Transaction ID', 'Transaction Type', 'Transaction Date', 'Item Code', 'Item Name', 'Category', 'Brand',
+        'Entered Quantity', 'Entered UOM', 'Converted Base Quantity', 'Stock Direction', 'Source Sheet', 'Source Row',
+        'Batch Number', 'Reference Number', 'Party / Section', 'Meta JSON', 'Remarks',
+        'Created By', 'Created At', 'Updated By', 'Updated At', 'Transaction Status', 'Record Hash',
+      ],
+      ...this.db.ledger.map((l, idx) => {
+        const row = [
+          l.txId, l.txType, l.txDate, l.itemCode, l.itemName, l.category, l.brand || '',
+          l.enteredQty, l.enteredUom, l.baseQty, l.direction, l.sourceSheet, l.sourceRow || idx + 2,
+          l.batchNo || '', l.refNo || '', l.partyOrSection || '', l.metaJson || '{}', l.remarks || '',
+          l.createdBy, l.createdAt, l.updatedBy, l.updatedAt, l.status, l.recordHash,
+        ];
+        rowHashes[`OPS:_SYS_Transaction_Ledger:${l.txId}`] = hashParts(row);
+        return row;
+      }),
+    ];
+
+    // 2. Procurement & Tender Spreadsheet (16SN_MJjvmWqt_OH8Hol3AVGB6hWFTM_rYOG1FTi2-yY)
+    const pDb: any = this.db.procurement || createDefaultProcurementDb(false);
+    const procSchemas: Record<string, string[]> = {
+      Indents: ['IndentNo', 'Date', 'Department', 'Requester', 'ItemCode', 'ItemName', 'RequiredQty', 'Unit', 'RequiredDeliveryDate', 'Priority', 'Status', 'ApprovedBy', 'ApprovalDate', 'Remarks', 'Timestamp'],
+      Suppliers: ['SupplierId', 'Name', 'PanNo', 'GstNo', 'ContactPerson', 'Phone', 'Email', 'Country', 'Address', 'PaymentTerms', 'Currency', 'LeadTimeDays', 'Rating', 'Timestamp'],
+      FreightForwarder: ['ForwarderId', 'Name', 'Address', 'ContactPerson', 'Phone', 'Email', 'Rating', 'Remarks', 'Timestamp'],
+      Quotations: ['QuotationNo', 'IndentNo', 'SupplierId', 'SupplierName', 'Date', 'ValidityDate', 'Currency', 'ExchangeRate', 'Incoterms', 'FreightCharges', 'OtherCharges', 'Subtotal', 'TotalAmount', 'TotalAmountNPR', 'Status', 'MDApproval', 'MDApprovalDate', 'MDNotes', 'AttachmentName', 'AttachmentUrl', 'ItemsJSON', 'Timestamp'],
+      PurchaseOrders: ['PONo', 'QuotationNo', 'SupplierId', 'SupplierName', 'OrderDate', 'DeliveryTerms', 'PaymentTerms', 'Incoterms', 'Currency', 'ExchangeRate', 'TotalValue', 'TotalValueNPR', 'ExpectedDeliveryDate', 'Status', 'ApprovalStatus', 'ItemsJSON', 'ReceivedStatus', 'ReceivedQty', 'PendingQty', 'Timestamp'],
+      LCTTPayments: ['PaymentId', 'PONo', 'SupplierName', 'BankName', 'PaymentType', 'Currency', 'Amount', 'ExchangeRate', 'AmountNPR', 'LCNumber', 'LCOpeningDate', 'MaturityDate', 'Status', 'PaymentStage', 'Remarks', 'Timestamp'],
+      Shipments: ['ShipmentId', 'PONo', 'SupplierName', 'ForwarderId', 'ForwarderName', 'ShippingLine', 'OriginType', 'OriginCountry', 'POL', 'POD', 'ContainerNo', 'BLAWBNo', 'ETD', 'ETA', 'ActualDeparture', 'ActualArrival', 'CustomsStatus', 'FreightAmountNPR', 'ShipmentStatus', 'Remarks', 'Timestamp'],
+      Tenders: ['TenderNo', 'TenderName', 'Address', 'ContactInfo', 'PublicationDate', 'SubmissionDeadline', 'ItemName', 'Quantity', 'Unit', 'EstimatedRate', 'BidSecurityAmount', 'BidSecurityStatus', 'Result', 'Remarks', 'Timestamp'],
+      TenderTracking: ['TrackingId', 'TenderNo', 'TenderName', 'Address', 'ContactInfo', 'LastSubmissionDate', 'ItemName', 'Unit', 'Quantity', 'RateIncVat', 'Amount', 'MuchulkaStatus', 'MuchulkaDate', 'LOIStatus', 'LOIDate', 'LOAStatus', 'LOADate', 'PGStatus', 'PGDate', 'SampleStatus', 'SampleDate', 'ProductionStatus', 'DispatchStatus', 'DispatchDate', 'Remarks', 'Timestamp'],
+      ExchangeRates: ['RateDate', 'USD', 'INR', 'EUR', 'GBP', 'CNY', 'NPR', 'Remarks', 'UpdatedBy', 'UpdatedAt'],
+      AuditLog: ['LogId', 'Timestamp', 'UserEmail', 'Action', 'Module', 'RecordId', 'Details'],
+    };
+
+    const procurement: Record<string, (string | number)[][]> = {};
+    for (const [tabName, cols] of Object.entries(procSchemas)) {
+      const list: any[] = tabName === 'ExchangeRates' ? this.getExchangeRateHistory() : (Array.isArray(pDb[tabName]) ? pDb[tabName] : []);
+      const pk = PROC_PRIMARY_KEYS[tabName] || cols[0];
+      const matrix: (string | number)[][] = [cols];
+      for (const rec of list) {
+        const row = cols.map((c) => {
+          if (tabName === 'AuditLog' && c === 'UserEmail') return rec.UserEmail ?? rec.User ?? '';
+          const v = rec[c];
+          return v === undefined || v === null ? '' : v;
+        });
+        matrix.push(row);
+        const pkVal = String(rec[pk] || '').trim();
+        if (pkVal) {
+          rowHashes[`PROC:${tabName}:${pkVal}`] = hashParts(row);
+        }
+      }
+      procurement[tabName] = matrix;
+    }
+
+    return {
+      operations: {
+        'Item Master': itemMasterRows,
+        Production: productionRows,
+        Dispatch: dispatchRows,
+        'Goods Reciept': grnRows,
+        Issue: issueRows,
+        'Finished Goods': fgRows,
+        'Raw Material': rmRows,
+        'Packing Material': pmRows,
+        'All Stock Balance': allStockRows,
+        _SYS_Transaction_Ledger: ledgerRows,
+      },
+      procurement,
+      rowHashes,
+    };
+  }
+
+  /**
+   * Reconciles data entered or edited directly in the two Google Spreadsheets
+   * cleanly and idempotently back into the ERP database without losing ERP state.
+   */
+  reconcileFromGoogleSheets(input: {
+    operations: Record<string, Record<string, string>[]>;
+    procurement: Record<string, Record<string, string>[]>;
+    opsRawRowCounts?: Record<string, number>;
+    procRawRowCounts?: Record<string, number>;
+    prevHashes: Record<string, string>;
+    initialLink?: boolean;
+  }): {
+    created: number;
+    updated: number;
+    deleted: number;
+    needsWriteBackOps: boolean;
+    needsWriteBackProc: boolean;
+    nextHashes: Record<string, string>;
+    errors: string[];
+  } {
+    const prev = input.prevHashes || {};
+    const nextHashes: Record<string, string> = {};
+    const isInitial = Boolean(input.initialLink) || Object.keys(prev).length === 0;
+    const isUntouchedSeedDb =
+      this.db.auditLogs.length <= 2 &&
+      !this.db.auditLogs.some((a) => !['SYSTEM_INIT', 'USER_LOGIN', 'USER_LOGOUT'].includes(a.action));
+    let created = 0;
+    let updated = 0;
+    let deleted = 0;
+    let needsWriteBackOps = false;
+    let needsWriteBackProc = false;
+    const errors: string[] = [];
+
+    const normDate = (val: any, fallbackToday = true): string => {
+      if (val === undefined || val === null) return fallbackToday ? todayIsoDate() : '';
+      const s = String(val).trim();
+      if (!s) return fallbackToday ? todayIsoDate() : '';
+      if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+      if (/^\d{4}\/\d{1,2}\/\d{1,2}/.test(s)) {
+        const [y, m, d] = s.slice(0, 10).split('/');
+        return `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
+      }
+      const dmy = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+      if (dmy) {
+        const p1 = Number(dmy[1]);
+        const p2 = Number(dmy[2]);
+        const y = dmy[3];
+        // Prefer DD/MM/YYYY unless second part > 12 (MM/DD/YYYY)
+        const month = p2 > 12 ? p1 : p1 > 12 ? p2 : p2;
+        const day = p2 > 12 ? p2 : p1 > 12 ? p1 : p1;
+        return `${y}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+      }
+      if (/^\d{5}(\.\d+)?$/.test(s)) {
+        const serial = Number(s);
+        if (serial > 20000 && serial < 90000) {
+          const utcMs = Math.round((serial - 25569) * 86400 * 1000);
+          return new Date(utcMs).toISOString().slice(0, 10);
+        }
+      }
+      const d = new Date(s);
+      if (!isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+      return fallbackToday ? todayIsoDate() : '';
+    };
+
+    const numOr = (val: any, def = 0): number => {
+      if (val === undefined || val === null) return def;
+      const cleaned = String(val)
+        .replace(/(NPR|USD|INR|EUR|GBP|CNY|RS\.?|रू)/gi, '')
+        .replace(/[$€£¥₹,\s]/g, '')
+        .trim();
+      if (!cleaned) return def;
+      const n = Number(cleaned);
+      return isNaN(n) ? def : n;
+    };
+
+    const normKey = (k: string) => k.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+    const pick = (row: Record<string, string>, ...keys: string[]) => {
+      for (const k of keys) {
+        if (row[k] !== undefined && String(row[k]).trim() !== '') return String(row[k]).trim();
+      }
+      const rowEntries = Object.entries(row);
+      for (const k of keys) {
+        const target = normKey(k);
+        const found = rowEntries.find(([rk, rv]) => normKey(rk) === target && String(rv ?? '').trim() !== '');
+        if (found) return String(found[1]).trim();
+      }
+      return '';
+    };
+
+    const normalizeCategory = (rawCat: string): string => {
+      const c = rawCat.trim().toLowerCase();
+      if (!c) return '';
+      if (c === 'wip' || c.includes('work in progress')) return 'WIP';
+      if (c.includes('finished')) return 'Finished Goods';
+      if (c.includes('raw')) return 'Raw Material';
+      if (c.includes('pack')) return 'Packing Material';
+      if (c.includes('store') || c.includes('spare')) return 'Stores & Spares';
+      const exact = FIXED_CATEGORIES.find((fc) => fc.toLowerCase() === c);
+      return exact || (c === 'other' || c === 'others' ? 'Others' : 'Others');
+    };
+
+    const resolveItemForSheetRow = (itemCodeRaw: string, itemNameRaw: string): ItemRecord | undefined => {
+      const code = itemCodeRaw.trim();
+      if (code) {
+        const byCode = this.db.items.find((it) => it.itemCode.trim().toLowerCase() === code.toLowerCase());
+        if (byCode) return byCode;
+      }
+      const nm = itemNameRaw.trim().toLowerCase();
+      if (nm) {
+        return this.db.items.find((it) => it.itemName.trim().toLowerCase() === nm);
+      }
+      return undefined;
+    };
+
+    const resolveUomForItem = (item: ItemRecord, rawUom: string): string => {
+      const u = rawUom.trim();
+      if (!u) return item.indexUnit;
+      const ul = u.toLowerCase();
+      const idxL = item.indexUnit.toLowerCase();
+      if (ul === idxL || ul === `${idxL}s` || `${ul}s` === idxL) return item.indexUnit;
+      if (item.conversionUnit) {
+        const convL = item.conversionUnit.toLowerCase();
+        if (
+          ul === convL ||
+          ul === `${convL}s` ||
+          `${ul}s` === convL ||
+          (convL === 'cartoon' && (ul === 'ctn' || ul === 'carton' || ul === 'cartons'))
+        ) {
+          return item.conversionUnit;
+        }
+      }
+      return u;
+    };
+
+    // 1. Operations: Item Master
+    const sheetItems = input.operations['Item Master'] || [];
+    const itemMasterRawCount = input.opsRawRowCounts?.['Item Master'] ?? (sheetItems.length > 0 ? sheetItems.length + 1 : 0);
+    if (itemMasterRawCount === 0 && this.db.items.length > 0) {
+      needsWriteBackOps = true;
+    }
+
+    const seenSheetItemCodes = new Set<string>();
+    const parsedItems: Array<{ code: string; name: string; cat: string; raw: Record<string, string> }> = [];
+    for (let i = 0; i < sheetItems.length; i++) {
+      const r = sheetItems[i];
+      const name = pick(r, 'Item Name', 'itemName', 'Name');
+      const rawCat = pick(r, 'Categories', 'Category', 'Item Category', 'category');
+      const cat = normalizeCategory(rawCat) || 'Others';
+      const idxU = pick(r, 'Index Unit', 'Base Unit', 'Unit', 'UOM', 'indexUnit');
+      if (!name || !idxU) continue;
+      let code = pick(r, 'Item Code', 'itemCode', 'Code');
+      if (code) seenSheetItemCodes.add(code);
+      parsedItems.push({ code, name, cat, raw: r });
+    }
+
+    // If initial link on untouched seed DB and Google Sheet already has real items, replace seed-only items not in sheet
+    if (isInitial && isUntouchedSeedDb && sheetItems.length > 0 && seenSheetItemCodes.size > 0) {
+      const kept = this.db.items.filter((it) => seenSheetItemCodes.has(it.itemCode));
+      if (kept.length !== this.db.items.length) {
+        this.db.items = kept;
+        updated++;
+      }
+    } else if (itemMasterRawCount >= 1) {
+      // Deletion detection for previously synced items removed from Google Sheet
+      const removedPrevItems = this.db.items.filter((it) => {
+        const hk = `OPS:Item Master:${it.itemCode}`;
+        return Boolean(prev[hk]) && !seenSheetItemCodes.has(it.itemCode) && !this.db.ledger.some((l) => l.itemCode === it.itemCode);
+      });
+      if (removedPrevItems.length > 0) {
+        const removeSet = new Set(removedPrevItems.map((x) => x.itemCode));
+        this.db.items = this.db.items.filter((it) => !removeSet.has(it.itemCode));
+        deleted += removedPrevItems.length;
+      }
+    }
+
+    for (let i = 0; i < parsedItems.length; i++) {
+      const { name, cat, raw: r } = parsedItems[i];
+      let code = parsedItems[i].code;
+      const idxU = pick(r, 'Index Unit', 'Base Unit', 'Unit', 'UOM', 'indexUnit');
+      const hashVal = hashParts(Object.keys(r).sort().map((k) => `${k}:${r[k]}`));
+      const existingIdx = code
+        ? this.db.items.findIndex((it) => it.itemCode.toLowerCase() === code.toLowerCase())
+        : this.db.items.findIndex((it) => it.category === cat && it.itemName.toLowerCase() === name.toLowerCase());
+
+      if (existingIdx === -1) {
+        if (!code) {
+          code = this.nextItemCode(FIXED_CATEGORIES.includes(cat) ? cat : 'Others');
+          needsWriteBackOps = true;
+        }
+        const convUnit = pick(r, 'Conversion Unit', 'Secondary Unit', 'Conv Unit', 'conversionUnit');
+        const convQty = convUnit ? numOr(pick(r, 'Conversion Quantity', 'Conversion Qty', 'Conv Qty', 'conversionQty'), 0) : 0;
+        const frac =
+          convUnit && convQty > 0
+            ? Math.round((1 / convQty) * 1000000) / 1000000
+            : numOr(pick(r, 'Fraction of Index Unit', 'fractionOfIndexUnit'), 1);
+        this.db.items.push({
+          itemCode: code,
+          itemName: name,
+          category: FIXED_CATEGORIES.includes(cat) ? cat : 'Others',
+          brand: pick(r, 'Brand Categories', 'Brand', 'Brand Name', 'brand'),
+          hsnCode: pick(r, 'HSN Code', 'HSN', 'hsnCode'),
+          indexUnit: idxU,
+          fractionOfIndexUnit: frac,
+          conversionQty: convQty,
+          conversionUnit: convUnit,
+          reorderLevel: numOr(pick(r, 'Reorder Level', 'Min Stock', 'reorderLevel'), 0),
+          status: pick(r, 'Status', 'status').toLowerCase() === 'inactive' ? 'Inactive' : 'Active',
+          createdDate: normDate(pick(r, 'Created Date', 'createdDate')),
+          updatedDate: normDate(pick(r, 'Updated Date', 'updatedDate')),
+        });
+        nextHashes[`OPS:Item Master:${code}`] = hashVal;
+        created++;
+      } else {
+        const it = this.db.items[existingIdx];
+        code = it.itemCode;
+        const convUnit = pick(r, 'Conversion Unit', 'Secondary Unit', 'Conv Unit', 'conversionUnit');
+        const convQty = convUnit ? numOr(pick(r, 'Conversion Quantity', 'Conversion Qty', 'Conv Qty', 'conversionQty'), it.conversionQty) : 0;
+        const nextStatus = pick(r, 'Status', 'status').toLowerCase() === 'inactive' ? 'Inactive' : 'Active';
+        const nextBrand = pick(r, 'Brand Categories', 'Brand', 'Brand Name', 'brand');
+        const nextHsn = pick(r, 'HSN Code', 'HSN', 'hsnCode');
+        const nextReorder = numOr(pick(r, 'Reorder Level', 'Min Stock', 'reorderLevel'), it.reorderLevel);
+        const changed =
+          it.itemName !== name ||
+          it.category !== cat ||
+          it.indexUnit !== idxU ||
+          it.conversionQty !== convQty ||
+          it.conversionUnit !== convUnit ||
+          it.brand !== nextBrand ||
+          it.hsnCode !== nextHsn ||
+          it.reorderLevel !== nextReorder ||
+          it.status !== nextStatus;
+        if (changed) {
+          it.itemName = name;
+          if (FIXED_CATEGORIES.includes(cat)) it.category = cat;
+          it.brand = nextBrand;
+          it.hsnCode = nextHsn;
+          it.indexUnit = idxU;
+          it.conversionUnit = convUnit;
+          it.conversionQty = convUnit ? convQty : 0;
+          it.fractionOfIndexUnit = convUnit && convQty > 0 ? Math.round((1 / convQty) * 1000000) / 1000000 : 1;
+          it.reorderLevel = nextReorder;
+          it.status = nextStatus;
+          it.updatedDate = normDate(pick(r, 'Updated Date', 'updatedDate'));
+          updated++;
+        }
+        nextHashes[`OPS:Item Master:${code}`] = hashVal;
+      }
+    }
+
+    // 2. Operations: Working Sheets & _SYS_Transaction_Ledger Sync
+    const workingDefs: Array<{
+      sheetName: 'Production' | 'Dispatch' | 'Goods Reciept' | 'Issue';
+      txType: LedgerRecord['txType'];
+      idKeys: string[];
+      dateKeys: string[];
+      qtyKeys: string[];
+      refKeys: string[];
+      partyKeys: string[];
+    }> = [
+      {
+        sheetName: 'Production',
+        txType: 'PRODUCTION',
+        idKeys: ['Production ID', 'Transaction ID', 'ID', 'txId'],
+        dateKeys: ['Production Date', 'Transaction Date', 'Tx Date', 'Date'],
+        qtyKeys: ['Quantity', 'Qty', 'Entered Quantity', 'Production Qty'],
+        refKeys: ['Production Reference', 'Reference Number', 'Ref No'],
+        partyKeys: ['Party / Section', 'Section', 'Department'],
+      },
+      {
+        sheetName: 'Dispatch',
+        txType: 'DISPATCH',
+        idKeys: ['Dispatch ID', 'Transaction ID', 'ID', 'txId'],
+        dateKeys: ['Dispatch Date', 'Transaction Date', 'Tx Date', 'Date'],
+        qtyKeys: ['Dispatch Quantity', 'Quantity', 'Qty', 'Entered Quantity'],
+        refKeys: ['Challan Number', 'Reference Number', 'Ref No'],
+        partyKeys: ['Customer/Party Name', 'Customer Name', 'Party Name', 'Party / Section'],
+      },
+      {
+        sheetName: 'Goods Reciept',
+        txType: 'GOODS_RECEIPT',
+        idKeys: ['Receipt ID', 'GRN ID', 'Transaction ID', 'ID', 'txId'],
+        dateKeys: ['Receipt Date', 'GRN Date', 'Transaction Date', 'Tx Date', 'Date'],
+        qtyKeys: ['Received Quantity', 'Receipt Quantity', 'Quantity', 'Qty', 'Entered Quantity'],
+        refKeys: ['Purchase Reference', 'Reference Number', 'Ref No'],
+        partyKeys: ['Supplier Name', 'Vendor Name', 'Party / Section'],
+      },
+      {
+        sheetName: 'Issue',
+        txType: 'ISSUE',
+        idKeys: ['Issue ID', 'Transaction ID', 'ID', 'txId'],
+        dateKeys: ['Issue Date', 'Transaction Date', 'Tx Date', 'Date'],
+        qtyKeys: ['Issue Quantity', 'Issued Quantity', 'Quantity', 'Qty', 'Entered Quantity'],
+        refKeys: ['Issue Reference', 'Reference Number', 'Ref No'],
+        partyKeys: ['Department/Production Section', 'Department', 'Section', 'Party / Section'],
+      },
+    ];
+
+    if (isInitial && isUntouchedSeedDb) {
+      const hasAnySheetTx =
+        workingDefs.some((d) => (input.operations[d.sheetName] || []).length > 0) ||
+        (input.operations['_SYS_Transaction_Ledger'] || []).length > 0;
+      if (hasAnySheetTx) {
+        this.db.ledger = [];
+        for (const d of workingDefs) {
+          this.db.workingSheets[d.sheetName] = [];
+        }
+        updated++;
+      } else if (sheetItems.length > 0) {
+        const validCodes = new Set(this.db.items.map((it) => it.itemCode));
+        const beforeLen = this.db.ledger.length;
+        this.db.ledger = this.db.ledger.filter((l) => validCodes.has(l.itemCode));
+        for (const d of workingDefs) {
+          this.db.workingSheets[d.sheetName] = (this.db.workingSheets[d.sheetName] || []).filter((w) => validCodes.has(w.itemCode));
+        }
+        if (this.db.ledger.length !== beforeLen) updated++;
+      }
+    }
+
+    const seenSheetTxIdsBySheet: Record<string, Set<string>> = {};
+    for (const def of workingDefs) {
+      const sheetRows = input.operations[def.sheetName] || [];
+      const rawCount = input.opsRawRowCounts?.[def.sheetName] ?? (sheetRows.length > 0 ? sheetRows.length + 1 : 0);
+      const localRows = this.db.ledger.filter((l) => l.sourceSheet === def.sheetName);
+      if (rawCount === 0 && localRows.length > 0) {
+        needsWriteBackOps = true;
+      }
+
+      const seenInThisSheet = new Set<string>();
+      seenSheetTxIdsBySheet[def.sheetName] = seenInThisSheet;
+
+      for (let i = 0; i < sheetRows.length; i++) {
+        const r = sheetRows[i];
+        const rawCode = pick(r, 'Item Code', 'itemCode', 'Code');
+        const rawName = pick(r, 'Item Name', 'itemName');
+        const matchedItem = resolveItemForSheetRow(rawCode, rawName);
+        const itemCode = matchedItem ? matchedItem.itemCode : rawCode;
+        const qtyRaw = numOr(pick(r, ...def.qtyKeys), 0);
+        if (!itemCode || qtyRaw <= 0) continue;
+
+        let txId = pick(r, ...def.idKeys);
+        if (txId) seenInThisSheet.add(txId);
+
+        const txDate = normDate(pick(r, ...def.dateKeys));
+        const rawUom = pick(r, 'UOM', 'Unit', 'Entered UOM');
+        const uom = matchedItem ? resolveUomForItem(matchedItem, rawUom) : rawUom;
+        const statusRaw = pick(r, 'Status', 'Transaction Status').toUpperCase() === 'CANCELLED' ? 'CANCELLED' : 'ACTIVE';
+        const refNo = pick(r, ...def.refKeys);
+        const party = pick(r, ...def.partyKeys);
+        const batchNo = pick(r, 'Batch/Lot Number', 'Batch Number', 'Batch No');
+        const remarks = pick(r, 'Remarks');
+        const unitRate = numOr(pick(r, 'Unit Rate', 'Rate', 'unitRate'), 0);
+        const currency = pick(r, 'Currency', 'currency') || 'NPR';
+        const exRateInput = numOr(pick(r, 'Exchange Rate', 'exchangeRate'), 0);
+        const poNo = pick(r, 'PO No', 'PONo', 'poNo');
+        const invoiceNo = pick(r, 'Invoice Number', 'Invoice No', 'invoiceNo');
+        const vehicleNo = pick(r, 'Vehicle Number', 'Vehicle No', 'vehicleNo');
+        const issuedTo = pick(r, 'Issued To', 'issuedTo');
+
+        const hashVal = hashParts(Object.keys(r).sort().map((k) => `${k}:${r[k]}`));
+        const existingTx = txId ? this.db.ledger.find((l) => l.txId === txId) : undefined;
+
+        if (!existingTx) {
+          if (!txId) {
+            txId = this.nextTxId(def.txType);
+            seenInThisSheet.add(txId);
+            needsWriteBackOps = true;
+          }
+          try {
+            const v = this.validateTx(
+              { txType: def.txType, txDate, itemCode, quantity: qtyRaw, uom: uom || undefined, allowNegativeOverride: true },
+              undefined,
+              true
+            );
+            const ts = pick(r, 'Created At') || nowIso();
+            const meta = this.enrichTxRateMeta(v.txDate, v.conv.enteredQty, {
+              unitRate,
+              currency,
+              exchangeRate: exRateInput > 0 ? exRateInput : undefined,
+              poNo: poNo || undefined,
+              invoiceNo: invoiceNo || undefined,
+              vehicleNo: vehicleNo || undefined,
+              issuedTo: issuedTo || undefined,
+            });
+            const candHash = hashParts([txId, v.txDate, v.item.itemCode, v.conv.enteredQty, v.conv.enteredUom, statusRaw]);
+            this.db.ledger.push({
+              txId,
+              txType: def.txType,
+              txDate: v.txDate,
+              itemCode: v.item.itemCode,
+              itemName: v.item.itemName,
+              category: v.item.category,
+              brand: v.item.brand,
+              enteredQty: v.conv.enteredQty,
+              enteredUom: v.conv.enteredUom,
+              baseQty: v.conv.baseQty,
+              direction: v.direction,
+              sourceSheet: def.sheetName,
+              sourceRow: i + 2,
+              batchNo,
+              refNo,
+              partyOrSection: party,
+              metaJson: JSON.stringify(meta),
+              remarks,
+              createdBy: pick(r, 'Created By') || 'Google Sheets Sync',
+              createdAt: ts,
+              updatedBy: 'Google Sheets Sync',
+              updatedAt: nowIso(),
+              status: statusRaw,
+              recordHash: candHash,
+            });
+            if (!this.db.workingSheets[def.sheetName]) this.db.workingSheets[def.sheetName] = [];
+            this.db.workingSheets[def.sheetName].push({
+              txId,
+              txDate: v.txDate,
+              itemCode: v.item.itemCode,
+              quantity: v.conv.enteredQty,
+              uom: v.conv.enteredUom,
+              partyOrSection: party,
+              refNo,
+              batchNo,
+              remarks,
+              status: statusRaw,
+              syncStatus: 'SYNCED',
+            });
+            nextHashes[`OPS:${def.sheetName}:${txId}`] = hashVal;
+            created++;
+          } catch (err: any) {
+            errors.push(`${def.sheetName} row ${i + 2}: ${err?.message || err}`);
+          }
+        } else {
+          try {
+            const v = this.validateTx(
+              { txType: def.txType, txDate, itemCode, quantity: qtyRaw, uom: uom || existingTx.enteredUom, allowNegativeOverride: true },
+              existingTx.txId,
+              true
+            );
+            const candHash = hashParts([txId, v.txDate, v.item.itemCode, v.conv.enteredQty, v.conv.enteredUom, statusRaw]);
+            const prevMeta = (() => { try { return JSON.parse(existingTx.metaJson || '{}'); } catch { return {}; } })();
+            const nextMeta = this.enrichTxRateMeta(v.txDate, v.conv.enteredQty, {
+              ...prevMeta,
+              unitRate: unitRate || prevMeta.unitRate || 0,
+              currency: currency || prevMeta.currency || 'NPR',
+              exchangeRate: exRateInput > 0 ? exRateInput : prevMeta.exchangeRate,
+              poNo: poNo || prevMeta.poNo,
+              invoiceNo: invoiceNo || prevMeta.invoiceNo,
+              vehicleNo: vehicleNo || prevMeta.vehicleNo,
+              issuedTo: issuedTo || prevMeta.issuedTo,
+            });
+            if (
+              existingTx.itemCode !== v.item.itemCode ||
+              existingTx.txDate !== v.txDate ||
+              existingTx.enteredQty !== v.conv.enteredQty ||
+              existingTx.enteredUom !== v.conv.enteredUom ||
+              existingTx.status !== statusRaw ||
+              existingTx.refNo !== refNo ||
+              existingTx.partyOrSection !== party ||
+              existingTx.batchNo !== batchNo ||
+              existingTx.remarks !== remarks ||
+              JSON.stringify(prevMeta) !== JSON.stringify(nextMeta)
+            ) {
+              existingTx.itemCode = v.item.itemCode;
+              existingTx.itemName = v.item.itemName;
+              existingTx.category = v.item.category;
+              existingTx.brand = v.item.brand;
+              existingTx.txDate = v.txDate;
+              existingTx.enteredQty = v.conv.enteredQty;
+              existingTx.enteredUom = v.conv.enteredUom;
+              existingTx.baseQty = v.conv.baseQty;
+              existingTx.status = statusRaw;
+              existingTx.refNo = refNo;
+              existingTx.partyOrSection = party;
+              existingTx.batchNo = batchNo;
+              existingTx.remarks = remarks;
+              existingTx.metaJson = JSON.stringify(nextMeta);
+              existingTx.updatedBy = 'Google Sheets Sync';
+              existingTx.updatedAt = nowIso();
+              existingTx.recordHash = candHash;
+              const wsRow = (this.db.workingSheets[def.sheetName] || []).find((w) => w.txId === txId);
+              if (wsRow) {
+                wsRow.txDate = v.txDate;
+                wsRow.itemCode = v.item.itemCode;
+                wsRow.quantity = v.conv.enteredQty;
+                wsRow.uom = v.conv.enteredUom;
+                wsRow.refNo = refNo;
+                wsRow.partyOrSection = party;
+                wsRow.batchNo = batchNo;
+                wsRow.remarks = remarks;
+                wsRow.status = statusRaw;
+              }
+              updated++;
+            }
+            nextHashes[`OPS:${def.sheetName}:${txId}`] = hashVal;
+          } catch (err: any) {
+            errors.push(`${def.sheetName} row ${i + 2}: ${err?.message || err}`);
+          }
+        }
+      }
+
+      // Deletion detection: if a previously synced TX was deleted from Google Sheet
+      if (rawCount >= 1) {
+        const removedTx = this.db.ledger.filter(
+          (l) => l.sourceSheet === def.sheetName && Boolean(prev[`OPS:${def.sheetName}:${l.txId}`]) && !seenInThisSheet.has(l.txId)
+        );
+        if (removedTx.length > 0) {
+          const rmIds = new Set(removedTx.map((t) => t.txId));
+          this.db.ledger = this.db.ledger.filter((l) => !rmIds.has(l.txId));
+          if (this.db.workingSheets[def.sheetName]) {
+            this.db.workingSheets[def.sheetName] = this.db.workingSheets[def.sheetName].filter((w) => !rmIds.has(w.txId));
+          }
+          deleted += removedTx.length;
+        }
+      }
+    }
+
+    // 2b. Operations: Also reconcile any extra rows in _SYS_Transaction_Ledger not already covered
+    const ledgerSheetRows = input.operations['_SYS_Transaction_Ledger'] || [];
+    for (let i = 0; i < ledgerSheetRows.length; i++) {
+      const r = ledgerSheetRows[i];
+      const txId = pick(r, 'Transaction ID', 'txId');
+      if (!txId) continue;
+      const rawType = pick(r, 'Transaction Type', 'txType').toUpperCase();
+      if (!['PRODUCTION', 'GOODS_RECEIPT', 'DISPATCH', 'ISSUE', 'OPENING_STOCK', 'ADJUSTMENT'].includes(rawType)) continue;
+      const rawCode = pick(r, 'Item Code', 'itemCode');
+      const rawName = pick(r, 'Item Name', 'itemName');
+      const matchedItem = resolveItemForSheetRow(rawCode, rawName);
+      const itemCode = matchedItem ? matchedItem.itemCode : rawCode;
+      const qtyRaw = numOr(pick(r, 'Entered Quantity', 'Quantity'), 0);
+      if (!itemCode || qtyRaw <= 0) continue;
+      if (this.db.ledger.some((l) => l.txId === txId)) continue;
+      try {
+        const txDate = normDate(pick(r, 'Transaction Date', 'txDate'));
+        const rawUom = pick(r, 'Entered UOM', 'UOM');
+        const uom = matchedItem ? resolveUomForItem(matchedItem, rawUom) : rawUom;
+        const v = this.validateTx(
+          { txType: rawType as any, txDate, itemCode, quantity: qtyRaw, uom: uom || undefined, allowNegativeOverride: true },
+          undefined,
+          true
+        );
+        let parsedMeta: Record<string, any> = {};
+        const mj = pick(r, 'Meta JSON', 'metaJson');
+        if (mj) { try { parsedMeta = JSON.parse(mj); } catch {} }
+        const statusRaw = pick(r, 'Transaction Status', 'Status').toUpperCase() === 'CANCELLED' ? 'CANCELLED' : 'ACTIVE';
+        const srcSheet =
+          pick(r, 'Source Sheet', 'sourceSheet') ||
+          (rawType === 'PRODUCTION' ? 'Production' : rawType === 'DISPATCH' ? 'Dispatch' : rawType === 'ISSUE' ? 'Issue' : 'Goods Reciept');
+        const candHash = hashParts([txId, v.txDate, v.item.itemCode, v.conv.enteredQty, v.conv.enteredUom, statusRaw]);
+        this.db.ledger.push({
+          txId,
+          txType: rawType as any,
+          txDate: v.txDate,
+          itemCode: v.item.itemCode,
+          itemName: v.item.itemName,
+          category: v.item.category,
+          brand: v.item.brand,
+          enteredQty: v.conv.enteredQty,
+          enteredUom: v.conv.enteredUom,
+          baseQty: v.conv.baseQty,
+          direction: v.direction,
+          sourceSheet: srcSheet,
+          sourceRow: Number(pick(r, 'Source Row')) || i + 2,
+          batchNo: pick(r, 'Batch Number', 'Batch/Lot Number'),
+          refNo: pick(r, 'Reference Number'),
+          partyOrSection: pick(r, 'Party / Section'),
+          metaJson: JSON.stringify(this.enrichTxRateMeta(v.txDate, v.conv.enteredQty, parsedMeta)),
+          remarks: pick(r, 'Remarks'),
+          createdBy: pick(r, 'Created By') || 'Google Sheets Sync',
+          createdAt: pick(r, 'Created At') || nowIso(),
+          updatedBy: 'Google Sheets Sync',
+          updatedAt: nowIso(),
+          status: statusRaw,
+          recordHash: candHash,
+        });
+        created++;
+      } catch (err: any) {
+        errors.push(`_SYS_Transaction_Ledger row ${i + 2}: ${err?.message || err}`);
+      }
+    }
+
+    // 3. Procurement & Tender Tabs + ExchangeRates + Settings
+    const pDb: any = this.db.procurement || (this.db.procurement = createDefaultProcurementDb(false));
+    const procSchemas: Record<string, string[]> = {
+      Indents: ['IndentNo', 'Date', 'Department', 'Requester', 'ItemCode', 'ItemName', 'RequiredQty', 'Unit', 'RequiredDeliveryDate', 'Priority', 'Status', 'ApprovedBy', 'ApprovalDate', 'Remarks', 'Timestamp'],
+      Suppliers: ['SupplierId', 'Name', 'PanNo', 'GstNo', 'ContactPerson', 'Phone', 'Email', 'Country', 'Address', 'PaymentTerms', 'Currency', 'LeadTimeDays', 'Rating', 'Timestamp'],
+      FreightForwarder: ['ForwarderId', 'Name', 'Address', 'ContactPerson', 'Phone', 'Email', 'Rating', 'Remarks', 'Timestamp'],
+      Quotations: ['QuotationNo', 'IndentNo', 'SupplierId', 'SupplierName', 'Date', 'ValidityDate', 'Currency', 'ExchangeRate', 'Incoterms', 'FreightCharges', 'OtherCharges', 'Subtotal', 'TotalAmount', 'TotalAmountNPR', 'Status', 'MDApproval', 'MDApprovalDate', 'MDNotes', 'AttachmentName', 'AttachmentUrl', 'ItemsJSON', 'Timestamp'],
+      PurchaseOrders: ['PONo', 'QuotationNo', 'SupplierId', 'SupplierName', 'OrderDate', 'DeliveryTerms', 'PaymentTerms', 'Incoterms', 'Currency', 'ExchangeRate', 'TotalValue', 'TotalValueNPR', 'ExpectedDeliveryDate', 'Status', 'ApprovalStatus', 'ItemsJSON', 'ReceivedStatus', 'ReceivedQty', 'PendingQty', 'Timestamp'],
+      LCTTPayments: ['PaymentId', 'PONo', 'SupplierName', 'BankName', 'PaymentType', 'Currency', 'Amount', 'ExchangeRate', 'AmountNPR', 'LCNumber', 'LCOpeningDate', 'MaturityDate', 'Status', 'PaymentStage', 'Remarks', 'Timestamp'],
+      Shipments: ['ShipmentId', 'PONo', 'SupplierName', 'ForwarderId', 'ForwarderName', 'ShippingLine', 'OriginType', 'OriginCountry', 'POL', 'POD', 'ContainerNo', 'BLAWBNo', 'ETD', 'ETA', 'ActualDeparture', 'ActualArrival', 'CustomsStatus', 'FreightAmountNPR', 'ShipmentStatus', 'Remarks', 'Timestamp'],
+      Tenders: ['TenderNo', 'TenderName', 'Address', 'ContactInfo', 'PublicationDate', 'SubmissionDeadline', 'ItemName', 'Quantity', 'Unit', 'EstimatedRate', 'BidSecurityAmount', 'BidSecurityStatus', 'Result', 'Remarks', 'Timestamp'],
+      TenderTracking: ['TrackingId', 'TenderNo', 'TenderName', 'Address', 'ContactInfo', 'LastSubmissionDate', 'ItemName', 'Unit', 'Quantity', 'RateIncVat', 'Amount', 'MuchulkaStatus', 'MuchulkaDate', 'LOIStatus', 'LOIDate', 'LOAStatus', 'LOADate', 'PGStatus', 'PGDate', 'SampleStatus', 'SampleDate', 'ProductionStatus', 'DispatchStatus', 'DispatchDate', 'Remarks', 'Timestamp'],
+    };
+    const numericProcFields = new Set([
+      'RequiredQty', 'LeadTimeDays', 'Rating', 'ExchangeRate', 'FreightCharges', 'OtherCharges', 'Subtotal',
+      'TotalAmount', 'TotalAmountNPR', 'TotalValue', 'TotalValueNPR', 'ReceivedQty', 'PendingQty',
+      'Amount', 'AmountNPR', 'FreightAmountNPR', 'Quantity', 'EstimatedRate', 'BidSecurityAmount', 'RateIncVat',
+    ]);
+    const dateProcFields = new Set([
+      'Date', 'OrderDate', 'ValidityDate', 'RequiredDeliveryDate', 'ExpectedDeliveryDate',
+      'LCOpeningDate', 'MaturityDate', 'PublicationDate', 'SubmissionDeadline', 'LastSubmissionDate',
+      'MuchulkaDate', 'LOIDate', 'LOADate', 'PGDate', 'SampleDate', 'DispatchDate',
+      'ETD', 'ETA', 'ActualDeparture', 'ActualArrival',
+    ]);
+
+    // First import ExchangeRates so PO/Quotation/LCTT conversions have latest date rates
+    const fxSheetRows = input.procurement['ExchangeRates'] || [];
+    const fxRawCount = input.procRawRowCounts?.['ExchangeRates'] ?? (fxSheetRows.length > 0 ? fxSheetRows.length + 1 : 0);
+    if (fxRawCount === 0 && Array.isArray(pDb.ExchangeRates) && pDb.ExchangeRates.length > 0) {
+      needsWriteBackProc = true;
+    }
+    const seenFxDates = new Set<string>();
+    for (let i = 0; i < fxSheetRows.length; i++) {
+      const raw = fxSheetRows[i];
+      if (!Object.values(raw).some((v) => String(v || '').trim() !== '')) continue;
+      const rateDate = normDate(pick(raw, 'RateDate', 'Rate Date', 'Date'));
+      seenFxDates.add(rateDate);
+      const hashVal = hashParts(Object.keys(raw).sort().map((k) => `${k}:${raw[k]}`));
+      const hashKey = `PROC:ExchangeRates:${rateDate}`;
+      const existingIdx = (pDb.ExchangeRates || []).findIndex((r: any) => r.RateDate === rateDate);
+      const nextEntry: ExchangeRateRecord = {
+        RateDate: rateDate,
+        USD: numOr(pick(raw, 'USD'), 135.5),
+        INR: numOr(pick(raw, 'INR'), 1.6015),
+        EUR: numOr(pick(raw, 'EUR'), 146.2),
+        GBP: numOr(pick(raw, 'GBP'), 172.8),
+        CNY: numOr(pick(raw, 'CNY'), 18.6),
+        NPR: 1.0,
+        Remarks: pick(raw, 'Remarks'),
+        UpdatedBy: pick(raw, 'UpdatedBy', 'Updated By') || 'Google Sheets Sync',
+        UpdatedAt: pick(raw, 'UpdatedAt', 'Updated At') || nowIso(),
+      };
+      if (existingIdx === -1) {
+        pDb.ExchangeRates.push(nextEntry);
+        created++;
+      } else {
+        const cur = pDb.ExchangeRates[existingIdx];
+        if (
+          cur.USD !== nextEntry.USD ||
+          cur.INR !== nextEntry.INR ||
+          cur.EUR !== nextEntry.EUR ||
+          cur.GBP !== nextEntry.GBP ||
+          cur.CNY !== nextEntry.CNY ||
+          (cur.Remarks || '') !== (nextEntry.Remarks || '')
+        ) {
+          pDb.ExchangeRates[existingIdx] = nextEntry;
+          updated++;
+        }
+      }
+      nextHashes[hashKey] = hashVal;
+    }
+    if (fxRawCount >= 1 && seenFxDates.size > 0) {
+      const removedFx = (pDb.ExchangeRates || []).filter(
+        (r: any) => Boolean(prev[`PROC:ExchangeRates:${r.RateDate}`]) && !seenFxDates.has(r.RateDate)
+      );
+      if (removedFx.length > 0) {
+        pDb.ExchangeRates = pDb.ExchangeRates.filter((r: any) => seenFxDates.has(r.RateDate) || !prev[`PROC:ExchangeRates:${r.RateDate}`]);
+        deleted += removedFx.length;
+      }
+    }
+
+    // Reconcile all 9 core Procurement & Tender tabs
+    const procTabs = Object.keys(procSchemas);
+    if (isInitial && isUntouchedSeedDb) {
+      const hasAnyProcRows = procTabs.some((t) => (input.procurement[t] || []).length > 0);
+      if (hasAnyProcRows) {
+        for (const t of procTabs) {
+          if ((input.procurement[t] || []).length > 0) {
+            pDb[t] = [];
+          }
+        }
+        updated++;
+      }
+    }
+
+    for (const tabName of procTabs) {
+      const pk = PROC_PRIMARY_KEYS[tabName];
+      const canonicalCols = procSchemas[tabName];
+      const sheetRows = input.procurement[tabName] || [];
+      const rawCount = input.procRawRowCounts?.[tabName] ?? (sheetRows.length > 0 ? sheetRows.length + 1 : 0);
+      const localList: any[] = Array.isArray(pDb[tabName]) ? pDb[tabName] : (pDb[tabName] = []);
+      if (rawCount === 0 && localList.length > 0) {
+        needsWriteBackProc = true;
+      }
+
+      const seenPks = new Set<string>();
+      for (let i = 0; i < sheetRows.length; i++) {
+        const raw = sheetRows[i];
+        const nonEmpty = Object.values(raw).some((v) => String(v || '').trim() !== '');
+        if (!nonEmpty) continue;
+
+        // Map sheet columns to canonical schema fields (case/space/underscore insensitive)
+        const cleanRec: Record<string, any> = {};
+        const rawKeyByNorm: Record<string, string> = {};
+        for (const rk of Object.keys(raw)) {
+          rawKeyByNorm[normKey(rk)] = raw[rk];
+        }
+        for (const col of canonicalCols) {
+          const val = raw[col] !== undefined ? raw[col] : rawKeyByNorm[normKey(col)];
+          if (val === undefined) continue;
+          if (numericProcFields.has(col)) {
+            cleanRec[col] = String(val).trim() === '' ? 0 : numOr(val, 0);
+          } else if (dateProcFields.has(col)) {
+            cleanRec[col] = normDate(val, false);
+          } else {
+            cleanRec[col] = String(val ?? '').trim();
+          }
+        }
+
+        let pkVal = String(cleanRec[pk] || '').trim();
+        if (pkVal) seenPks.add(pkVal);
+
+        const hashVal = hashParts(Object.keys(raw).sort().map((k) => `${k}:${raw[k]}`));
+        const existingIdx = pkVal
+          ? localList.findIndex((r) => String(r[pk] || '').trim().toLowerCase() === pkVal.toLowerCase())
+          : -1;
+
+        if (existingIdx === -1) {
+          if (!pkVal) {
+            const prefix = PROC_PREFIXES[tabName] || 'REC';
+            const ids = new Set(localList.map((r) => String(r[pk] || '')));
+            let n = 1001;
+            while (ids.has(`${prefix}-${n}`)) n++;
+            pkVal = `${prefix}-${n}`;
+            cleanRec[pk] = pkVal;
+            seenPks.add(pkVal);
+            needsWriteBackProc = true;
+          }
+          if (!cleanRec.Timestamp) cleanRec.Timestamp = new Date().toISOString();
+          localList.push(cleanRec);
+          nextHashes[`PROC:${tabName}:${pkVal}`] = hashVal;
+          created++;
+        } else {
+          const cur = localList[existingIdx];
+          pkVal = String(cur[pk] || pkVal);
+          seenPks.add(pkVal);
+          const merged = { ...cur, ...cleanRec };
+          let diff = false;
+          for (const col of canonicalCols) {
+            if (col === 'Timestamp') continue;
+            if (String(cur[col] ?? '') !== String(merged[col] ?? '')) {
+              diff = true;
+              break;
+            }
+          }
+          if (diff) {
+            localList[existingIdx] = merged;
+            updated++;
+          }
+          nextHashes[`PROC:${tabName}:${pkVal}`] = hashVal;
+        }
+      }
+
+      // Deletion detection for Procurement tabs
+      if (rawCount >= 1) {
+        const removed = localList.filter((r) => {
+          const id = String(r[pk] || '').trim();
+          return id && Boolean(prev[`PROC:${tabName}:${id}`]) && !seenPks.has(id);
+        });
+        if (removed.length > 0) {
+          const rmSet = new Set(removed.map((r) => String(r[pk] || '').trim()));
+          pDb[tabName] = localList.filter((r) => !rmSet.has(String(r[pk] || '').trim()));
+          deleted += removed.length;
+        }
+      }
+    }
+
+    const latestFx = this.getExchangeRateHistory();
+    if (latestFx.length > 0) {
+      pDb.exchangeRates = {
+        USD: latestFx[0].USD,
+        INR: latestFx[0].INR,
+        EUR: latestFx[0].EUR,
+        GBP: latestFx[0].GBP,
+        CNY: latestFx[0].CNY,
+        NPR: 1.0,
+      };
+    }
+
+    if (created > 0 || updated > 0 || deleted > 0) {
+      this.audit(
+        'GOOGLE_SHEETS_SYNC',
+        'Integration',
+        'SHEETS_2WAY',
+        `Synced from Google Sheets (created=${created}, updated=${updated}, deleted=${deleted})`
+      );
+      this.bump();
+    }
+
+    return {
+      created,
+      updated,
+      deleted,
+      needsWriteBackOps,
+      needsWriteBackProc,
+      nextHashes,
+      errors,
+    };
+  }
+
+  /**
    * Executes all 15 mandatory test scenarios against an isolated clean simulator instance.
    */
   static runAll15VerificationTests(): TestResult[] {

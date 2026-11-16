@@ -7,23 +7,60 @@ import com.birathealthcare.dipen.security.ErpPrincipal;
 import com.birathealthcare.dipen.security.PermissionChecker;
 import com.birathealthcare.dipen.service.*;
 import com.google.api.services.sheets.v4.Sheets;
-import com.google.api.services.sheets.v4.model.ClearValuesRequest;
-import com.google.api.services.sheets.v4.model.ValueRange;
+import com.google.api.services.sheets.v4.model.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.scheduling.annotation.Async;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 @Service
 public class GoogleSheetsSyncService {
 
+  private static final Logger log = LoggerFactory.getLogger(GoogleSheetsSyncService.class);
   private static final ZoneId KTM = ZoneId.of("Asia/Kathmandu");
   private static final DateTimeFormatter DT_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+  private static final String HASH_PREFIX = "GS_HASH:";
+
+  private static final List<String> OPS_IMPORT_TABS = List.of(
+      "Item Master", "Production", "Dispatch", "Goods Reciept", "Issue"
+  );
+  private static final List<String> OPS_EXPORT_TABS = List.of(
+      "Item Master", "Production", "Dispatch", "Goods Reciept", "Issue",
+      "Finished Goods", "Raw Material", "Packing Material", "All Stock Balance"
+  );
+  private static final List<String> PROC_IMPORT_TABS = List.of(
+      "ExchangeRates", "Indents", "Suppliers", "FreightForwarder",
+      "Quotations", "PurchaseOrders", "LCTTPayments", "Shipments",
+      "Tenders", "TenderTracking"
+  );
+
+  private static final List<String> SYSTEM_PERMS = List.of(
+      "ITEM_MANAGE", "PRODUCTION_WRITE", "RECEIPT_WRITE", "DISPATCH_WRITE",
+      "ISSUE_WRITE", "ISSUE_FG", "STOCK_VIEW", "REPORT_GENERATE",
+      "REPORT_SUBMIT", "STOCK_ADJUST", "TX_EDIT", "TX_CANCEL",
+      "NEGATIVE_OVERRIDE", "SYNC_ADMIN", "AUDIT_VIEW", "USER_MANAGE",
+      "PROCUREMENT_VIEW", "PROCUREMENT_WRITE", "PROCUREMENT_APPROVE", "TENDER_WRITE"
+  );
+
+  private final AtomicBoolean syncLock = new AtomicBoolean(false);
+
+  @Value("${dipen.google.auto-sync-enabled:true}")
+  private boolean autoSyncEnabled;
 
   private final GoogleSheetsClientProvider clientProvider;
   private final ItemMasterRepository itemRepo;
@@ -66,10 +103,175 @@ public class GoogleSheetsSyncService {
     this.versionService = versionService;
   }
 
+  /**
+   * Automatic background sync pulling any rows entered/modified directly inside
+   * Operations (1gGmpt4g...) or Procurement (16SN_MJj...) Google Sheets into MySQL DIPEN_ERP.
+   */
+  @Scheduled(fixedDelayString = "${dipen.google.auto-sync-interval-ms:30000}", initialDelay = 15000)
+  public void scheduledAutoPullFromSheets() {
+    if (!autoSyncEnabled || !clientProvider.isConfigured()) return;
+    if (!syncLock.compareAndSet(false, true)) return;
+    try {
+      withSystemPrincipal(() -> {
+        try {
+          syncAllBidirectionalInternal(false);
+        } catch (Exception ex) {
+          log.warn("Scheduled Google Sheets auto-sync failed: {}", ex.getMessage());
+        }
+      });
+    } finally {
+      syncLock.set(false);
+    }
+  }
+
+  /**
+   * Automatically pushes ERP mutations to the matching Google Spreadsheet(s)
+   * without blocking or rolling back the MySQL database commit.
+   */
+  @Async
+  public void pushScopeAsync(String scope) {
+    if (!autoSyncEnabled || !clientProvider.isConfigured()) return;
+    if (!syncLock.compareAndSet(false, true)) return;
+    try {
+      withSystemPrincipal(() -> {
+        try {
+          if ("OPERATIONS".equalsIgnoreCase(scope) || "BOTH".equalsIgnoreCase(scope)) {
+            for (String tab : OPS_EXPORT_TABS) {
+              exportToGoogleSheetInternal("OPERATIONS", tab, "system-auto-sync");
+            }
+          }
+          if ("PROCUREMENT".equalsIgnoreCase(scope) || "BOTH".equalsIgnoreCase(scope)) {
+            for (String tab : PROC_IMPORT_TABS) {
+              exportToGoogleSheetInternal("PROCUREMENT", tab, "system-auto-sync");
+            }
+          }
+        } catch (Exception ex) {
+          log.warn("Async Google Sheets push failed for {}: {}", scope, ex.getMessage());
+          logSyncError(scope, 0, "", "Auto-push failed: " + ex.getMessage(), Map.of("scope", scope));
+        }
+      });
+    } finally {
+      syncLock.set(false);
+    }
+  }
+
+  public Map<String, Object> syncAllBidirectionalNow() {
+    ErpPrincipal actor = permissionChecker.assertPermission("SYNC_ADMIN");
+    if (!clientProvider.isConfigured()) {
+      throw new ErpBusinessException("Google Sheets credentials file is not configured. Set DIPEN_GOOGLE_CREDENTIALS_PATH.", 503);
+    }
+    if (!syncLock.compareAndSet(false, true)) {
+      throw new ErpBusinessException("Google Sheets sync is already in progress. Please wait a few seconds.", 409);
+    }
+    try {
+      return syncAllBidirectionalInternal(true);
+    } finally {
+      syncLock.set(false);
+    }
+  }
+
+  private Map<String, Object> syncAllBidirectionalInternal(boolean forcePushAll) {
+    ErpPrincipal actor = permissionChecker.currentPrincipal();
+    Map<String, String> allSettings = versionService.getAllSettingsMap();
+    int totalCreated = 0, totalUpdated = 0, totalSkipped = 0, totalFailed = 0;
+
+    Sheets client = clientProvider.createSheetsClient();
+    ensureTabsExist(client, clientProvider.getOperationsSpreadsheetId(), OPS_EXPORT_TABS);
+    ensureTabsExist(client, clientProvider.getProcurementSpreadsheetId(), PROC_IMPORT_TABS);
+
+    for (String tab : OPS_IMPORT_TABS) {
+      Map<String, Object> r = pullIncrementalTab("OPERATIONS", tab, actor, allSettings);
+      totalCreated += ((Number) r.get("created")).intValue();
+      totalUpdated += ((Number) r.get("updated")).intValue();
+      totalSkipped += ((Number) r.get("skipped")).intValue();
+      totalFailed += ((Number) r.get("failed")).intValue();
+    }
+    for (String tab : PROC_IMPORT_TABS) {
+      Map<String, Object> r = pullIncrementalTab("PROCUREMENT", tab, actor, allSettings);
+      totalCreated += ((Number) r.get("created")).intValue();
+      totalUpdated += ((Number) r.get("updated")).intValue();
+      totalSkipped += ((Number) r.get("skipped")).intValue();
+      totalFailed += ((Number) r.get("failed")).intValue();
+    }
+
+    if (forcePushAll || totalCreated > 0 || totalUpdated > 0) {
+      for (String tab : OPS_EXPORT_TABS) {
+        exportToGoogleSheetInternal("OPERATIONS", tab, actor.getEmail());
+      }
+      for (String tab : PROC_IMPORT_TABS) {
+        exportToGoogleSheetInternal("PROCUREMENT", tab, actor.getEmail());
+      }
+    }
+
+    if (totalCreated > 0 || totalUpdated > 0) {
+      versionService.bumpVersion();
+    }
+
+    Map<String, Object> out = new LinkedHashMap<>();
+    out.put("created", totalCreated);
+    out.put("updated", totalUpdated);
+    out.put("skipped", totalSkipped);
+    out.put("failed", totalFailed);
+    out.put("dataVersion", versionService.getCurrentVersion());
+    return out;
+  }
+
+  private Map<String, Object> pullIncrementalTab(String scope, String sheetName, ErpPrincipal actor, Map<String, String> settings) {
+    String spreadsheetId = resolveSpreadsheetId(scope);
+    String actualTab = resolveExistingTabName(spreadsheetId, sheetName);
+    List<List<Object>> values = readSheetRange(spreadsheetId, "'" + actualTab.replace("'", "''") + "'!A1:AZ10000");
+    int created = 0, updated = 0, skipped = 0, failed = 0;
+
+    if (values.size() > 1) {
+      List<String> headers = values.get(0).stream().map(v -> String.valueOf(v).trim()).toList();
+      for (int i = 1; i < values.size(); i++) {
+        Map<String, Object> rowMap = rowToMap(headers, values.get(i));
+        if (rowMap.values().stream().allMatch(v -> String.valueOf(v).isBlank())) continue;
+        String rowKey = resolveRowPrimaryKey(scope, sheetName, rowMap, i + 1);
+        String settingKey = HASH_PREFIX + scope + ":" + sheetName + ":" + rowKey;
+        String rowHash = md5Hex(String.valueOf(rowMap));
+        if (rowHash.equals(settings.get(settingKey))) {
+          skipped++;
+          continue;
+        }
+        try {
+          String status = upsertSheetRow(scope, sheetName, rowMap, i + 1, actor);
+          versionService.saveSetting(settingKey, rowHash, "Google Sheets sync row hash");
+          if ("CREATED".equals(status)) created++;
+          else if ("UPDATED".equals(status)) updated++;
+          else skipped++;
+        } catch (Exception ex) {
+          failed++;
+          logSyncError(sheetName, i + 1, str(firstKey(rowMap, "Item Code", "itemCode")), ex.getMessage(), rowMap);
+        }
+      }
+    }
+
+    if (created > 0 || updated > 0 || failed > 0) {
+      SheetsSyncLogEntity syncLog = new SheetsSyncLogEntity();
+      syncLog.setSyncId("SYNC-" + System.currentTimeMillis() + "-" + sheetName.hashCode());
+      syncLog.setDirection("AUTO_IMPORT");
+      syncLog.setSpreadsheetScope(scope);
+      syncLog.setSheetName(sheetName);
+      syncLog.setActorEmail(actor.getEmail());
+      syncLog.setRowsProcessed(created + updated + skipped + failed);
+      syncLog.setRowsCreated(created);
+      syncLog.setRowsUpdated(updated);
+      syncLog.setRowsSkipped(skipped);
+      syncLog.setRowsFailed(failed);
+      syncLog.setStatus(failed == 0 ? "SUCCESS" : "PARTIAL_WITH_ERRORS");
+      syncLog.setSummary("Auto-synced from " + sheetName + ": created=" + created + ", updated=" + updated + ", skipped=" + skipped + ", failed=" + failed);
+      syncLog.setCreatedAt(LocalDateTime.now(KTM));
+      syncLogRepo.save(syncLog);
+    }
+
+    return Map.of("created", created, "updated", updated, "skipped", skipped, "failed", failed);
+  }
+
   public Map<String, Object> previewImportFromSheet(String scope, String sheetName) {
     permissionChecker.assertAnyPermission("SYNC_ADMIN", "PROCUREMENT_WRITE", "RECEIPT_WRITE");
     String spreadsheetId = resolveSpreadsheetId(scope);
-    List<List<Object>> values = readSheetRange(spreadsheetId, sheetName + "!A1:Z5000");
+    List<List<Object>> values = readSheetRange(spreadsheetId, "'" + sheetName.replace("'", "''") + "'!A1:Z5000");
     if (values.size() <= 1) {
       return Map.of("sheetName", sheetName, "totalRows", 0, "newRows", 0, "updateRows", 0, "skippedRows", 0, "errorRows", List.of(), "preview", List.of());
     }
@@ -114,7 +316,7 @@ public class GoogleSheetsSyncService {
   public Map<String, Object> commitImportFromSheet(String scope, String sheetName) {
     ErpPrincipal actor = permissionChecker.assertPermission("SYNC_ADMIN");
     String spreadsheetId = resolveSpreadsheetId(scope);
-    List<List<Object>> values = readSheetRange(spreadsheetId, sheetName + "!A1:Z5000");
+    List<List<Object>> values = readSheetRange(spreadsheetId, "'" + sheetName.replace("'", "''") + "'!A1:Z5000");
 
     int created = 0, updated = 0, skipped = 0, failed = 0;
     if (values.size() > 1) {
@@ -124,6 +326,8 @@ public class GoogleSheetsSyncService {
         if (rowMap.values().stream().allMatch(v -> String.valueOf(v).isBlank())) continue;
         try {
           String status = upsertSheetRow(scope, sheetName, rowMap, i + 1, actor);
+          String rowKey = resolveRowPrimaryKey(scope, sheetName, rowMap, i + 1);
+          versionService.saveSetting(HASH_PREFIX + scope + ":" + sheetName + ":" + rowKey, md5Hex(String.valueOf(rowMap)), "Google Sheets sync row hash");
           if ("CREATED".equals(status)) created++;
           else if ("UPDATED".equals(status)) updated++;
           else skipped++;
@@ -135,70 +339,79 @@ public class GoogleSheetsSyncService {
     }
 
     versionService.bumpVersion();
-    SheetsSyncLogEntity log = new SheetsSyncLogEntity();
-    log.setSyncId("SYNC-" + System.currentTimeMillis());
-    log.setDirection("IMPORT");
-    log.setSpreadsheetScope(scope);
-    log.setSheetName(sheetName);
-    log.setActorEmail(actor.getEmail());
-    log.setRowsProcessed(created + updated + skipped + failed);
-    log.setRowsCreated(created);
-    log.setRowsUpdated(updated);
-    log.setRowsSkipped(skipped);
-    log.setRowsFailed(failed);
-    log.setStatus(failed == 0 ? "SUCCESS" : "PARTIAL_WITH_ERRORS");
-    log.setSummary("Imported from " + sheetName + ": created=" + created + ", updated=" + updated + ", skipped=" + skipped + ", failed=" + failed);
-    log.setCreatedAt(LocalDateTime.now(KTM));
-    syncLogRepo.save(log);
+    SheetsSyncLogEntity logEntry = new SheetsSyncLogEntity();
+    logEntry.setSyncId("SYNC-" + System.currentTimeMillis());
+    logEntry.setDirection("IMPORT");
+    logEntry.setSpreadsheetScope(scope);
+    logEntry.setSheetName(sheetName);
+    logEntry.setActorEmail(actor.getEmail());
+    logEntry.setRowsProcessed(created + updated + skipped + failed);
+    logEntry.setRowsCreated(created);
+    logEntry.setRowsUpdated(updated);
+    logEntry.setRowsSkipped(skipped);
+    logEntry.setRowsFailed(failed);
+    logEntry.setStatus(failed == 0 ? "SUCCESS" : "PARTIAL_WITH_ERRORS");
+    logEntry.setSummary("Imported from " + sheetName + ": created=" + created + ", updated=" + updated + ", skipped=" + skipped + ", failed=" + failed);
+    logEntry.setCreatedAt(LocalDateTime.now(KTM));
+    syncLogRepo.save(logEntry);
 
     return Map.of(
-        "syncId", log.getSyncId(),
+        "syncId", logEntry.getSyncId(),
         "created", created,
         "updated", updated,
         "skipped", skipped,
         "failed", failed,
-        "status", log.getStatus()
+        "status", logEntry.getStatus()
     );
   }
 
   public Map<String, Object> exportToGoogleSheet(String scope, String sheetName) {
     ErpPrincipal actor = permissionChecker.assertAnyPermission("SYNC_ADMIN", "REPORT_GENERATE", "PROCUREMENT_VIEW");
+    return exportToGoogleSheetInternal(scope, sheetName, actor.getEmail());
+  }
+
+  private Map<String, Object> exportToGoogleSheetInternal(String scope, String sheetName, String actorEmail) {
     String spreadsheetId = resolveSpreadsheetId(scope);
     List<List<Object>> matrix = buildExportMatrix(scope, sheetName);
 
     Sheets client = clientProvider.createSheetsClient();
+    ensureTabsExist(client, spreadsheetId, List.of(sheetName));
     try {
-      String clearRange = "'" + sheetName + "'!A1:Z";
+      String escaped = sheetName.replace("'", "''");
+      String clearRange = "'" + escaped + "'!A1:Z";
       client.spreadsheets().values().clear(spreadsheetId, clearRange, new ClearValuesRequest()).execute();
-      ValueRange body = new ValueRange().setValues(matrix);
-      client.spreadsheets().values()
-          .update(spreadsheetId, "'" + sheetName + "'!A1", body)
-          .setValueInputOption("USER_ENTERED")
-          .execute();
+      if (!matrix.isEmpty()) {
+        ValueRange body = new ValueRange().setValues(matrix);
+        client.spreadsheets().values()
+            .update(spreadsheetId, "'" + escaped + "'!A1", body)
+            .setValueInputOption("USER_ENTERED")
+            .execute();
+      }
     } catch (Exception ex) {
       throw new ErpBusinessException("Google Sheets export failed: " + ex.getMessage(), 502);
     }
 
-    SheetsSyncLogEntity log = new SheetsSyncLogEntity();
-    log.setSyncId("SYNC-" + System.currentTimeMillis());
-    log.setDirection("EXPORT");
-    log.setSpreadsheetScope(scope);
-    log.setSheetName(sheetName);
-    log.setActorEmail(actor.getEmail());
-    log.setRowsProcessed(Math.max(0, matrix.size() - 1));
-    log.setRowsCreated(Math.max(0, matrix.size() - 1));
-    log.setStatus("SUCCESS");
-    log.setSummary("Exported " + Math.max(0, matrix.size() - 1) + " rows from DIPEN_ERP to Google Sheet '" + sheetName + "'");
-    log.setCreatedAt(LocalDateTime.now(KTM));
-    syncLogRepo.save(log);
+    SheetsSyncLogEntity logEntry = new SheetsSyncLogEntity();
+    logEntry.setSyncId("SYNC-" + System.currentTimeMillis() + "-" + Math.abs(sheetName.hashCode() % 1000));
+    logEntry.setDirection("EXPORT");
+    logEntry.setSpreadsheetScope(scope);
+    logEntry.setSheetName(sheetName);
+    logEntry.setActorEmail(actorEmail);
+    logEntry.setRowsProcessed(Math.max(0, matrix.size() - 1));
+    logEntry.setRowsCreated(Math.max(0, matrix.size() - 1));
+    logEntry.setStatus("SUCCESS");
+    logEntry.setSummary("Exported " + Math.max(0, matrix.size() - 1) + " rows from DIPEN_ERP to Google Sheet '" + sheetName + "'");
+    logEntry.setCreatedAt(LocalDateTime.now(KTM));
+    syncLogRepo.save(logEntry);
 
-    return Map.of("syncId", log.getSyncId(), "sheetName", sheetName, "exportedRows", Math.max(0, matrix.size() - 1));
+    return Map.of("syncId", logEntry.getSyncId(), "sheetName", sheetName, "exportedRows", Math.max(0, matrix.size() - 1));
   }
 
   public Map<String, Object> getSyncOverview() {
     permissionChecker.assertAnyPermission("SYNC_ADMIN", "STOCK_VIEW");
     return Map.of(
         "googleSheetsConfigured", clientProvider.isConfigured(),
+        "autoSyncEnabled", autoSyncEnabled,
         "operationsSpreadsheetId", clientProvider.getOperationsSpreadsheetId(),
         "procurementSpreadsheetId", clientProvider.getProcurementSpreadsheetId(),
         "openSyncErrors", syncErrorRepo.findByStatusOrderByErrorTimestampDesc("OPEN"),
@@ -218,6 +431,55 @@ public class GoogleSheetsSyncService {
     syncErrorRepo.save(err);
   }
 
+  private void ensureTabsExist(Sheets client, String spreadsheetId, List<String> requiredTabs) {
+    try {
+      Spreadsheet ss = client.spreadsheets().get(spreadsheetId).setFields("sheets.properties.title").execute();
+      Set<String> existing = new HashSet<>();
+      if (ss.getSheets() != null) {
+        for (Sheet sh : ss.getSheets()) {
+          if (sh.getProperties() != null && sh.getProperties().getTitle() != null) {
+            existing.add(sh.getProperties().getTitle());
+          }
+        }
+      }
+      List<Request> reqs = new ArrayList<>();
+      for (String tab : requiredTabs) {
+        if (!existing.contains(tab)) {
+          reqs.add(new Request().setAddSheet(new AddSheetRequest().setProperties(new SheetProperties().setTitle(tab))));
+        }
+      }
+      if (!reqs.isEmpty()) {
+        client.spreadsheets().batchUpdate(spreadsheetId, new BatchUpdateSpreadsheetRequest().setRequests(reqs)).execute();
+      }
+    } catch (Exception ex) {
+      log.warn("Unable to inspect/create spreadsheet tabs for {}: {}", spreadsheetId, ex.getMessage());
+    }
+  }
+
+  private void withSystemPrincipal(Runnable action) {
+    ErpPrincipal principal = new ErpPrincipal(
+        "system-sheets-sync@birathealthcare.com",
+        "Google Sheets Auto-Sync",
+        "Super Admin",
+        "System Integration",
+        "Active",
+        SYSTEM_PERMS
+    );
+    var authorities = SYSTEM_PERMS.stream().map(SimpleGrantedAuthority::new).toList();
+    var auth = new UsernamePasswordAuthenticationToken(principal, "SYSTEM_SYNC", authorities);
+    var prev = SecurityContextHolder.getContext().getAuthentication();
+    try {
+      SecurityContextHolder.getContext().setAuthentication(auth);
+      action.run();
+    } finally {
+      if (prev != null) {
+        SecurityContextHolder.getContext().setAuthentication(prev);
+      } else {
+        SecurityContextHolder.clearContext();
+      }
+    }
+  }
+
   private String resolveSpreadsheetId(String scope) {
     return "PROCUREMENT".equalsIgnoreCase(scope)
         ? clientProvider.getProcurementSpreadsheetId()
@@ -232,6 +494,19 @@ public class GoogleSheetsSyncService {
     } catch (Exception ex) {
       throw new ErpBusinessException("Unable to read Google Sheet range '" + range + "': " + ex.getMessage(), 502);
     }
+  }
+
+  private String resolveRowPrimaryKey(String scope, String sheetName, Map<String, Object> row, int rowNum) {
+    if ("PROCUREMENT".equalsIgnoreCase(scope)) {
+      String firstVal = row.values().stream().findFirst().map(String::valueOf).orElse("").trim();
+      return firstVal.isEmpty() ? "ROW-" + rowNum : firstVal;
+    }
+    if ("Item Master".equals(sheetName)) {
+      String c = str(row.get("Item Code"));
+      return c.isEmpty() ? "ROW-" + rowNum : c;
+    }
+    String txId = str(firstKey(row, "Production ID", "Dispatch ID", "Receipt ID", "Issue ID", "Transaction ID"));
+    return txId.isEmpty() ? "ROW-" + rowNum : txId;
   }
 
   private String classifySheetRow(String scope, String sheetName, Map<String, Object> row) {
@@ -262,25 +537,29 @@ public class GoogleSheetsSyncService {
   private String upsertSheetRow(String scope, String sheetName, Map<String, Object> row, int rowNum, ErpPrincipal actor) {
     if ("PROCUREMENT".equalsIgnoreCase(scope)) {
       if ("ExchangeRates".equals(sheetName)) {
-        fxService.saveExchangeRates(row);
+        Map<String, Object> fxRow = new LinkedHashMap<>(row);
+        if (!fxRow.containsKey("RateDate")) fxRow.put("RateDate", firstKey(row, "RateDate", "Rate Date", "Date"));
+        fxService.saveExchangeRates(fxRow);
         return "UPDATED";
       }
-      Map<String, Object> res = procurementService.saveRecordInternal(sheetName, row, actor.getEmail());
+      Map<String, Object> normalized = normalizeProcurementRow(row);
+      Map<String, Object> res = procurementService.saveRecordInternal(sheetName, normalized, actor.getEmail());
       return Boolean.TRUE.equals(res.get("updated")) ? "UPDATED" : "CREATED";
     }
     if ("Item Master".equals(sheetName)) {
       Map<String, Object> payload = new LinkedHashMap<>();
-      payload.put("itemCode", str(row.get("Item Code")));
-      payload.put("itemName", str(row.get("Item Name")));
-      payload.put("category", str(row.get("Categories")));
-      payload.put("brand", str(row.get("Brand Categories")));
-      payload.put("hsnCode", str(row.get("HSN Code")));
-      payload.put("indexUnit", str(row.get("Index Unit")));
-      payload.put("fractionOfIndexUnit", row.get("Fraction of Index Unit"));
-      payload.put("conversionQty", row.get("Conversion Quantity"));
-      payload.put("conversionUnit", str(row.get("Conversion Unit")));
-      payload.put("reorderLevel", row.get("Reorder Level"));
-      if (!str(payload.get("itemCode")).isEmpty() && itemRepo.existsById(str(payload.get("itemCode")))) {
+      String code = str(firstKey(row, "Item Code", "itemCode", "Code"));
+      payload.put("itemCode", code);
+      payload.put("itemName", str(firstKey(row, "Item Name", "itemName", "Name")));
+      payload.put("category", str(firstKey(row, "Categories", "Category", "Item Category", "category")));
+      payload.put("brand", str(firstKey(row, "Brand Categories", "Brand", "Brand Name", "brand")));
+      payload.put("hsnCode", str(firstKey(row, "HSN Code", "HSN", "hsnCode")));
+      payload.put("indexUnit", str(firstKey(row, "Index Unit", "Base Unit", "Unit", "UOM", "indexUnit")));
+      payload.put("fractionOfIndexUnit", firstKey(row, "Fraction of Index Unit", "fractionOfIndexUnit"));
+      payload.put("conversionQty", firstKey(row, "Conversion Quantity", "Conversion Qty", "conversionQty"));
+      payload.put("conversionUnit", str(firstKey(row, "Conversion Unit", "Secondary Unit", "conversionUnit")));
+      payload.put("reorderLevel", firstKey(row, "Reorder Level", "Min Stock", "reorderLevel"));
+      if (!code.isEmpty() && itemRepo.existsById(code)) {
         itemService.updateItem(payload);
         return "UPDATED";
       } else {
@@ -296,16 +575,27 @@ public class GoogleSheetsSyncService {
       case "Issue" -> "ISSUE";
       default -> throw new ErpBusinessException("Unsupported working sheet import: " + sheetName);
     };
-    String txId = str(firstKey(row, "Production ID", "Dispatch ID", "Receipt ID", "Issue ID", "Transaction ID"));
+    String txId = str(firstKey(row, "Production ID", "Dispatch ID", "Receipt ID", "GRN ID", "Issue ID", "Transaction ID", "txId"));
     Map<String, Object> payload = new LinkedHashMap<>();
-    payload.put("txDate", firstKey(row, "Production Date", "Dispatch Date", "Receipt Date", "Issue Date", "Transaction Date"));
-    payload.put("itemCode", row.get("Item Code"));
-    payload.put("quantity", firstKey(row, "Quantity", "Dispatch Quantity", "Received Quantity", "Issue Quantity"));
-    payload.put("uom", row.get("UOM"));
-    payload.put("batchNo", row.get("Batch/Lot Number"));
-    payload.put("refNo", firstKey(row, "Production Reference", "Challan Number", "Purchase Reference", "Issue Reference"));
-    payload.put("partyOrSection", firstKey(row, "Customer/Party Name", "Supplier Name", "Department/Production Section"));
-    payload.put("remarks", row.get("Remarks"));
+    payload.put("txDate", firstKey(row, "Production Date", "Dispatch Date", "Receipt Date", "Issue Date", "Transaction Date", "Date"));
+    payload.put("itemCode", firstKey(row, "Item Code", "itemCode", "Code"));
+    payload.put("quantity", firstKey(row, "Quantity", "Qty", "Dispatch Quantity", "Received Quantity", "Issue Quantity", "Entered Quantity"));
+    payload.put("uom", firstKey(row, "UOM", "Unit", "Entered UOM"));
+    payload.put("batchNo", firstKey(row, "Batch/Lot Number", "Batch Number", "Batch No"));
+    payload.put("refNo", firstKey(row, "Production Reference", "Challan Number", "Purchase Reference", "Issue Reference", "Reference Number"));
+    payload.put("partyOrSection", firstKey(row, "Customer/Party Name", "Supplier Name", "Department/Production Section", "Party / Section"));
+    payload.put("remarks", firstKey(row, "Remarks"));
+
+    Map<String, Object> meta = new LinkedHashMap<>();
+    Object unitRate = firstKey(row, "Unit Rate", "Rate", "unitRate");
+    Object currency = firstKey(row, "Currency", "currency");
+    Object exRate = firstKey(row, "Exchange Rate", "exchangeRate");
+    Object poNo = firstKey(row, "PO No", "PONo", "poNo");
+    if (!str(unitRate).isEmpty()) meta.put("unitRate", unitRate);
+    if (!str(currency).isEmpty()) meta.put("currency", currency);
+    if (!str(exRate).isEmpty()) meta.put("exchangeRate", exRate);
+    if (!str(poNo).isEmpty()) meta.put("poNo", poNo);
+    if (!meta.isEmpty()) payload.put("meta", meta);
 
     if (!txId.isEmpty() && ledgerRepo.existsById(txId)) {
       txService.updateTransaction(txId, payload);
@@ -367,7 +657,7 @@ public class GoogleSheetsSyncService {
     };
     @SuppressWarnings("unchecked")
     List<Map<String, Object>> txs = (List<Map<String, Object>>) txService.getTransactionHistory(Map.of("txType", txType, "page", 1, "pageSize", 5000)).get("records");
-    rows.add(List.of("Tx ID", "Tx Type", "Date", "Item Code", "Item Name", "Category", "Entered Qty", "UOM", "Base Qty", "Unit Rate", "Currency", "Exchange Rate", "Total NPR", "Party / Section", "Reference", "Status"));
+    rows.add(List.of("Transaction ID", "Transaction Type", "Transaction Date", "Item Code", "Item Name", "Category", "Quantity", "UOM", "Converted Base Qty", "Unit Rate", "Currency", "Exchange Rate", "Total NPR", "Party / Section", "Reference", "Status"));
     for (Map<String, Object> t : txs) {
       rows.add(List.of(t.get("txId"), t.get("txType"), t.get("txDate"), t.get("itemCode"), t.get("itemName"), t.get("category"),
           t.get("enteredQty"), t.get("enteredUom"), t.get("baseQty"), t.get("unitRate"), t.get("currency"), t.get("exchangeRate"),
@@ -389,6 +679,17 @@ public class GoogleSheetsSyncService {
     syncErrorRepo.save(e);
   }
 
+  private static String md5Hex(String raw) {
+    try {
+      byte[] digest = MessageDigest.getInstance("MD5").digest(raw.getBytes(StandardCharsets.UTF_8));
+      StringBuilder sb = new StringBuilder();
+      for (byte b : digest) sb.append(String.format("%02x", b));
+      return sb.toString();
+    } catch (Exception e) {
+      return Integer.toHexString(raw.hashCode());
+    }
+  }
+
   private static Map<String, Object> rowToMap(List<String> headers, List<Object> vals) {
     Map<String, Object> map = new LinkedHashMap<>();
     for (int i = 0; i < headers.size(); i++) {
@@ -398,10 +699,70 @@ public class GoogleSheetsSyncService {
     return map;
   }
 
+  private String resolveExistingTabName(String spreadsheetId, String canonicalName) {
+    try {
+      Sheets client = clientProvider.createSheetsClient();
+      Spreadsheet ss = client.spreadsheets().get(spreadsheetId).setFields("sheets.properties.title").execute();
+      if (ss.getSheets() != null) {
+        List<String> titles = ss.getSheets().stream()
+            .filter(s -> s.getProperties() != null && s.getProperties().getTitle() != null)
+            .map(s -> s.getProperties().getTitle())
+            .toList();
+        if (titles.contains(canonicalName)) return canonicalName;
+        if ("Goods Reciept".equals(canonicalName) && titles.contains("Goods Receipt")) return "Goods Receipt";
+        String targetNorm = canonicalName.toLowerCase().replaceAll("[^a-z0-9]", "");
+        for (String t : titles) {
+          if (t.toLowerCase().replaceAll("[^a-z0-9]", "").equals(targetNorm)) return t;
+        }
+      }
+    } catch (Exception ignored) {}
+    return canonicalName;
+  }
+
+  private static Map<String, Object> normalizeProcurementRow(Map<String, Object> row) {
+    Map<String, Object> out = new LinkedHashMap<>(row);
+    Map<String, String> canonical = Map.ofEntries(
+        Map.entry("indentno", "IndentNo"),
+        Map.entry("supplierid", "SupplierId"),
+        Map.entry("forwarderid", "ForwarderId"),
+        Map.entry("quotationno", "QuotationNo"),
+        Map.entry("pono", "PONo"),
+        Map.entry("paymentid", "PaymentId"),
+        Map.entry("shipmentid", "ShipmentId"),
+        Map.entry("tenderno", "TenderNo"),
+        Map.entry("trackingid", "TrackingId"),
+        Map.entry("orderdate", "OrderDate"),
+        Map.entry("totalvalue", "TotalValue"),
+        Map.entry("totalvaluenpr", "TotalValueNPR"),
+        Map.entry("totalamount", "TotalAmount"),
+        Map.entry("totalamountnpr", "TotalAmountNPR"),
+        Map.entry("exchangerate", "ExchangeRate"),
+        Map.entry("suppliername", "SupplierName"),
+        Map.entry("tendername", "TenderName")
+    );
+    for (Map.Entry<String, Object> e : row.entrySet()) {
+      String norm = e.getKey().toLowerCase().replaceAll("[^a-z0-9]", "");
+      String targetKey = canonical.get(norm);
+      if (targetKey != null && !out.containsKey(targetKey)) {
+        out.put(targetKey, e.getValue());
+      }
+    }
+    return out;
+  }
+
   private static Object firstKey(Map<String, Object> m, String... keys) {
     for (String k : keys) {
       if (m.containsKey(k) && m.get(k) != null && !String.valueOf(m.get(k)).trim().isEmpty()) {
         return m.get(k);
+      }
+    }
+    for (String k : keys) {
+      String target = k.toLowerCase().replaceAll("[^a-z0-9]", "");
+      for (Map.Entry<String, Object> e : m.entrySet()) {
+        if (e.getKey() != null && e.getKey().toLowerCase().replaceAll("[^a-z0-9]", "").equals(target)
+            && e.getValue() != null && !String.valueOf(e.getValue()).trim().isEmpty()) {
+          return e.getValue();
+        }
       }
     }
     return "";

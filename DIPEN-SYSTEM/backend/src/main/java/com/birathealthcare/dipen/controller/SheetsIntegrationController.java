@@ -51,6 +51,14 @@ public class SheetsIntegrationController {
         versionService.getCurrentVersion());
   }
 
+  @PostMapping("/sync-all")
+  public ApiResponse syncAllBidirectional() {
+    Map<String, Object> res = syncService.syncAllBidirectionalNow();
+    return ApiResponse.ok("Two-way Google Sheets sync completed.",
+        res,
+        versionService.getCurrentVersion());
+  }
+
   @PostMapping("/errors/{errorId}/resolve")
   public ApiResponse resolveError(@PathVariable String errorId) {
     syncService.resolveSyncError(errorId);
