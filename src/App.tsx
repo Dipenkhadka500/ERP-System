@@ -4,6 +4,7 @@ import {
   Copy,
   Database,
   Download,
+  ExternalLink,
   FileCode2,
   FlaskConical,
   Play,
@@ -14,6 +15,18 @@ import {
 import { ErpRole, GasSimulatorEngine, TestResult } from './gasSimulator';
 
 type StudioTab = 'preview' | 'codejs' | 'indexhtml' | 'setup';
+
+function isInitialDirectWebAppMode(): boolean {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('studio') === '1') return false;
+    if (params.get('mode') === 'erp') return true;
+    const host = window.location.hostname;
+    return host.startsWith('ais-pre-') || host.endsWith('.vercel.app');
+  } catch {
+    return false;
+  }
+}
 
 const ROLES: ErpRole[] = [
   'Super Admin',
@@ -64,6 +77,7 @@ function buildBridgedIndexHtml(rawHtml: string): string {
 }
 
 export default function App() {
+  const [directWebAppMode, setDirectWebAppMode] = useState<boolean>(() => isInitialDirectWebAppMode());
   const [activeTab, setActiveTab] = useState<StudioTab>('preview');
   const [codeJs, setCodeJs] = useState<string>('');
   const [indexHtml, setIndexHtml] = useState<string>('');
@@ -272,6 +286,39 @@ export default function App() {
 
   const dbSnap = simRef.current.getDbSnapshot();
 
+  const directErpUrl = useMemo(() => {
+    try {
+      return `${window.location.origin}/?mode=erp`;
+    } catch {
+      return '/?mode=erp';
+    }
+  }, []);
+
+  if (directWebAppMode) {
+    return (
+      <div className="w-screen h-screen bg-white relative overflow-hidden">
+        {loadError && (
+          <div className="m-6 p-4 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
+            {loadError}
+          </div>
+        )}
+        {bridgedSrcDoc ? (
+          <iframe
+            key={iframeKey}
+            title="Birat Healthcare Operations ERP Web App"
+            srcDoc={bridgedSrcDoc}
+            className="w-full h-full border-0 block"
+            sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-downloads allow-popups allow-popups-to-escape-sandbox"
+          />
+        ) : (
+          <div className="h-full flex items-center justify-center text-sm text-slate-500">
+            Loading Birat Healthcare ERP Web App...
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen flex flex-col bg-[#F8FAFC] text-[#0F172A]">
       {/* 3-ZONE TOP BAR CONTRACT */}
@@ -323,7 +370,33 @@ export default function App() {
           </button>
         </nav>
 
-        <div className="shrink-0">
+        <div className="shrink-0 flex items-center gap-2">
+          <button
+            onClick={() => copyText(directErpUrl, 'weblink')}
+            className="px-3 py-2 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors whitespace-nowrap shrink-0 inline-flex items-center gap-1.5"
+            title="Copy direct full-screen Web App link"
+          >
+            {copiedTarget === 'weblink' ? (
+              <>
+                <Check className="w-3.5 h-3.5 text-green-600" />
+                Link Copied
+              </>
+            ) : (
+              <>
+                <Copy className="w-3.5 h-3.5" />
+                Copy Web App Link
+              </>
+            )}
+          </button>
+          <button
+            onClick={() => setDirectWebAppMode(true)}
+            disabled={!indexHtml}
+            className="px-3 py-2 text-xs font-semibold text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 disabled:opacity-50 transition-colors whitespace-nowrap shrink-0 inline-flex items-center gap-1.5"
+            title="Run full-screen ERP Web App without developer toolbar"
+          >
+            <ExternalLink className="w-3.5 h-3.5" />
+            Run Web App
+          </button>
           <button
             onClick={downloadBundle}
             disabled={!codeJs || !indexHtml}

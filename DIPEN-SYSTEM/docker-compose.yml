@@ -1,0 +1,50 @@
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: dipen-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: DIPEN_ERP
+      MYSQL_USER: dipen_app
+      MYSQL_PASSWORD: ${DIPEN_DB_PASSWORD:-DipenErp@2026}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-DipenRoot@2026}
+      TZ: Asia/Kathmandu
+    ports:
+      - "127.0.0.1:3306:3306"
+    volumes:
+      - dipen_mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u root -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  dipen-erp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dipen-erp-app
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      SERVER_PORT: 8080
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/DIPEN_ERP?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Kathmandu&characterEncoding=UTF-8
+      DIPEN_DB_USER: dipen_app
+      DIPEN_DB_PASSWORD: ${DIPEN_DB_PASSWORD:-DipenErp@2026}
+      DIPEN_OPS_SHEET_ID: 1gGmpt4gKEE4Nu42960A8cmdrXaTpT-IKHW5oTAWGAJs
+      DIPEN_PROC_SHEET_ID: 16SN_MJjvmWqt_OH8Hol3AVGB6hWFTM_rYOG1FTi2-yY
+      DIPEN_GOOGLE_CREDENTIALS_PATH: /app/secrets/google-service-account.json
+      DIPEN_BACKUP_ENABLED: "true"
+      DIPEN_BACKUP_DIR: /app/backups
+      DIPEN_MYSQLDUMP_PATH: mysqldump
+    ports:
+      - "8080:8080"
+    volumes:
+      - dipen_backups:/app/backups
+      - ./secrets:/app/secrets:ro
+
+volumes:
+  dipen_mysql_data:
+  dipen_backups:
